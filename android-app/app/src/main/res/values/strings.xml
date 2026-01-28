@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">HITSZ AutoNet</string>
+    <string name="username_hint">Username</string>
+    <string name="password_hint">Password</string>
+    <string name="save_button">Save Credentials</string>
+    <string name="start_service">Start Monitoring</string>
+    <string name="stop_service">Stop Monitoring</string>
+    <string name="auto_start">Start on Boot</string>
+    <string name="auto_start_description">Automatically start monitoring after device boot</string>
+    <string name="monitoring">Monitoring network...</string>
+    <string name="connected">Connected - Monitoring...</string>
+    <string name="login_attempt">Network lost. Attempting login...</string>
+    <string name="login_success">Login successful. You are back online.</string>
+    <string name="login_failed">Login failed. Will retry.</string>
+</resources>

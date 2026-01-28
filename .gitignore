@@ -1,0 +1,82 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# PyCharm
+.idea/
+
+# VS Code
+.vscode/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Credentials and secrets
+.env
+*.pem
+*.key
+credentials.json
+
+# Logs
+*.log
+logs/
+*.log.*
+
+# ChromeDriver
+chromedriver
+chromedriver.exe
+.wdm/
+
+# Android
+android-app/.gradle/
+android-app/.idea/
+android-app/local.properties
+android-app/build/
+android-app/app/build/
+android-app/*.iml
+android-app/.externalNativeBuild
+android-app/.cxx
+android-app/captures/
+android-app/.navigation/
+android-app/output.json
+
+# APK files
+*.apk
+*.aab
+
+# Backup files
+*.backup
+*.backup[0-9]
+
+# Research/temporary files
+research-findings/

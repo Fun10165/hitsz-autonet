@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="md_theme_light_primary">#006C4C</color>
+    <color name="md_theme_light_onPrimary">#FFFFFF</color>
+    <color name="md_theme_light_primaryContainer">#89F8C7</color>
+    <color name="md_theme_light_onPrimaryContainer">#002114</color>
+    <color name="md_theme_light_secondary">#4D6357</color>
+    <color name="md_theme_light_onSecondary">#FFFFFF</color>
+    <color name="md_theme_light_secondaryContainer">#CFE9D9</color>
+    <color name="md_theme_light_onSecondaryContainer">#0A1F16</color>
+    <color name="ic_launcher_background">#006C4C</color>
+</resources>
