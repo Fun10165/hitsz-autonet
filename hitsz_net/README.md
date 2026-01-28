@@ -1,35 +1,163 @@
-# 哈工大(深圳)校园网络登陆助手
--- 用于无图形化界面的Linux服务器
+# HITSZ Network Auto-Login - Python Daemon
 
-## 安装步骤
+Automated login daemon for HITSZ campus network using Selenium WebDriver.
 
-1.下载代码
->`git clone git@github.com:siliconx/hitsz_net.git`
+## Overview
 
-2.安装selenium
->`pip3 install selenium`
+This Python script provides automated authentication for HITSZ campus network. It runs as a background service on macOS (via LaunchAgent) and detects when network access is blocked by the captive portal, then automatically logs in.
 
-3.下载并安装chrome浏览器(https://www.google.com/chrome/)
->`sudo dpkg -i google-chrome-xxx.deb`
+## Features
 
-4.下载并解压chrome驱动(https://npm.taobao.org/)
->`unzip chromedriver_linux64.zip`
->
->注意浏览器和驱动的版本应一致
+- **Automated Login**: Detects network status and logs in when needed
+- **Captive Portal Detection**: Identifies when network access requires authentication
+- **macOS Service Integration**: Runs as LaunchAgent for automatic startup
+- **ChromeDriver Auto-Management**: Automatically downloads compatible ChromeDriver
+- **Headless Operation**: Runs without visible browser windows
 
-5.把chrome驱动移动到任一环境变量中的目录，如`/usr/local/bin`
->`sudo mv chromedriver /usr/local/bin`
+## Installation
 
-6.给hitsz_net.py加可执行权限
->`chmod +x hitsz_net.py`
+### Prerequisites
 
-7.把hitsz_net.py移动到任一环境变量中的目录，如`/usr/local/bin`
->`sudo mv hitsz_net.py /usr/local/bin`
+- Python 3.8+
+- Chrome browser installed
+- macOS 10.15+ (for LaunchAgent features)
 
-8.通过以上步骤，就可以通过在命令行输入 `hitsz_net.py` 来登陆校园网络了。
->当然, 可以给Python脚本起一个更容易记忆的名字，如`hitsz_net`
+### Setup
 
-9.release log
-* 20250212: 由于本人已经毕业多年，项目已经很久没更新，校园网认证系统升级后存在不兼容的问题，感谢@seer8616提交的MR
+1. Install Python dependencies:
+```bash
+pip3 install -r requirements.txt
+```
 
-!注：不同的操作系统及浏览器可能有所不同，我的环境是Ubuntu16.04 + Google Chrome 77.0.3865.90, (64-bit)
+2. Create configuration file `.env`:
+```bash
+HITSZ_USERNAME=your_username
+HITSZ_PASSWORD=your_password
+```
+
+Configuration file locations (checked in order):
+- `~/.config/hitsz-autonet/.env`
+- `/etc/hitsz-autonet/.env`
+- `./.env` (current directory)
+
+### Install as macOS Service
+
+```bash
+python3 service/install.py install --config .env
+```
+
+Check service status:
+```bash
+python3 service/install.py status
+```
+
+Uninstall service:
+```bash
+python3 service/install.py uninstall
+```
+
+## Manual Usage
+
+Run once (single authentication attempt):
+```bash
+python3 hitsz_net/hitsz_net.py --once
+```
+
+Run as foreground daemon (checks every 60 seconds):
+```bash
+python3 hitsz_net/hitsz_net.py --daemon
+```
+
+Update ChromeDriver to match Chrome version:
+```bash
+python3 hitsz_net/hitsz_net.py --update-driver
+```
+
+## How It Works
+
+1. **Network Check**: Performs HTTP request to baidu.com
+2. **Captive Portal Detection**: Checks if response redirects to campus portal
+3. **Automated Login**: If captive portal detected, launches headless Chrome to authenticate
+4. **Verification**: Validates authentication success via `window.CONFIG.page` status
+5. **Continuous Monitoring**: Repeats check every 60 seconds
+
+## Logs
+
+Service logs are stored at:
+- `~/Library/Logs/hitsz-autonet/service.log` - Normal operation logs
+- `~/Library/Logs/hitsz-autonet/error.log` - Error logs
+
+View logs:
+```bash
+tail -f ~/Library/Logs/hitsz-autonet/service.log
+```
+
+## Configuration
+
+### Environment Variables
+
+- `HITSZ_USERNAME` - Campus network username
+- `HITSZ_PASSWORD` - Campus network password
+
+### Service Configuration
+
+LaunchAgent plist: `~/Library/LaunchAgents/edu.hitsz.autonet.plist`
+
+The service:
+- Runs on network state changes (KeepAlive NetworkState trigger)
+- Automatically restarts on failure
+- Runs in user context (LaunchAgent)
+
+## Troubleshooting
+
+### ChromeDriver Issues
+
+If you get ChromeDriver version mismatch errors:
+```bash
+python3 hitsz_net/hitsz_net.py --update-driver
+```
+
+Note: ChromeDriver updates require internet access. If you're offline due to captive portal, use mobile hotspot temporarily.
+
+### Service Won't Start
+
+1. Check if credentials are configured in `.env`
+2. Verify `.env` file is in one of the default locations
+3. Check logs at `~/Library/Logs/hitsz-autonet/error.log`
+4. Ensure Chrome browser is installed
+
+### Authentication Fails
+
+1. Verify credentials are correct in `.env`
+2. Check if campus portal is accessible: `http://10.248.98.2`
+3. Test with `--once` flag for detailed output
+4. Check logs for specific error messages
+
+## Platform Support
+
+- **macOS**: Full support with LaunchAgent integration
+- **Linux**: Basic support (requires manual daemon setup or cron job)
+
+For Linux users, consider setting up a systemd service or cron job for automated execution.
+
+## Dependencies
+
+- `selenium>=4.0.0` - Browser automation
+- `webdriver-manager>=3.8.0` - ChromeDriver management
+- `requests>=2.25.0` - HTTP client for network testing
+- `python-dotenv` - Environment variable loading
+
+See `requirements.txt` for complete dependency list.
+
+## Acknowledgments
+
+This project is inspired by and adapted from the original [hitsz_net](https://github.com/siliconx/hitsz_net) project by siliconx. The original project provided the foundation for HITSZ campus network authentication automation.
+
+## Related Projects
+
+- **Android App**: Native Android implementation available in `../android-app/`
+  - See [android-app/README.md](../android-app/README.md) for details
+
+## License
+
+Same license terms as the original hitsz_net project.
