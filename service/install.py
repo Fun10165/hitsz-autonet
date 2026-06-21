@@ -28,6 +28,7 @@ PLIST_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
         <string>--config</string>
         <string>{config_path}</string>
 {extra_args}
+    </array>
     
     <key>RunAtLoad</key>
     <true/>
@@ -221,7 +222,15 @@ def main():
     if hasattr(args, "interval") and args.interval != 60:
         extra_args.extend(["--interval", str(args.interval)])
 
-    installer = ServiceInstaller(script_path, config_path, extra_args=extra_args)
+    script_path = args.script if hasattr(args, "script") else "./hitsz_net/hitsz_net.py"
+    config_path = args.config if hasattr(args, "config") else ""
+
+    installer = ServiceInstaller(
+        script_path,
+        config_path,
+        interval=getattr(args, "interval", 60),
+        extra_args=extra_args,
+    )
 
     if args.command == "install":
         installer.install()
