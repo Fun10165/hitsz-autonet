@@ -1,357 +1,227 @@
-# AGENTS.md - HITSZ AutoNet Project
+# Repository Guidelines
+
+**Generated:** 2026-06-17
 
 ## Project Overview
-Automated HITSZ campus network authentication with two implementations:
-- **Android App** (Primary): Native Kotlin app with background service for network monitoring and auto-login
-- **Python Daemon** (Legacy): Selenium-based macOS LaunchAgent for automated authentication
 
-## Build/Lint/Test Commands
+Automated HITSZ (Harbin Institute of Technology, Shenzhen) campus-network authentication — two independent implementations sharing operational constants but no code:
 
-### Android App
+- **Android App** (primary): Native Kotlin app with foreground service, `WebView`-based login, `DataStore` preferences. Manual on-device testing.
+- **Python Daemon** (legacy): Single-file `hitsz_net.py` — Selenium + ChromeDriver headless browser login, macOS LaunchAgent service. Synchronous `while True` loop.
 
-#### Build Commands
+Both probe `http://www.baidu.com` for connectivity, detect captive-portal redirects, and authenticate against `http://10.248.98.2/srun_portal_pc?ac_id=1&theme=basic2` on a 60-second loop.
+
+## Architecture & Data Flow
+
+### Shared Constants (must stay aligned across platforms)
+
+| Constant | Value |
+|----------|-------|
+| Login URL | `http://10.248.98.2/srun_portal_pc?ac_id=1&theme=basic2` |
+| Check URL | `http://www.baidu.com` |
+| Poll interval | 60 seconds |
+
+### Android Data Flow
+
+```
+BootReceiver ──(if auto-start)──> NetworkMonitorService
+                                        │
+MainActivity ──(start/stop)─────────────┤
+                                        │
+                             ┌── while(true) every 60s ──┐
+                             │                           │
+                        NetworkChecker.isOnline()         │
+                             │                           │
+                      ┌──────┴──────┐                    │
+                      │  offline?   │                    │
+                      └──────┬──────┘                    │
+                             │ yes                       │
+                        LoginManager.login()              │
+                        (WebView + JS injection)          │
+                             │                           │
+                        Notification ─────────────────────┘
+```
+
+- `NetworkChangeReceiver` is **passive** — logs connectivity changes but does not drive the loop; the service owns the check/login cycle.
+- `NetworkChecker` uses two-tier validation: `ConnectivityManager` + `NET_CAPABILITY_VALIDATED` for local state, then OkHttp GET to Baidu with body inspection for `'百度'` to rule out captive portals.
+- `LoginManager` creates a headless `WebView` on `Dispatchers.Main`, injects JavaScript to fill credentials and click the login button, then verifies via `HttpURLConnection` to Baidu. Falls back through multiple DOM selectors (PC vs mobile Vue.js portal versions). Timeouts: 30s page load, 2s page-load delay, 3s submit delay.
+- `PreferencesManager` uses Jetpack `DataStore` (not `SharedPreferences`). Keys: `username`, `password`, `auto_start`. Credentials stored unencrypted.
+
+### Python Data Flow
+
+```
+main() ──> argparse ──> load_config() ──> while True:
+                                               │
+                                          check_internet()
+                                          (requests.get to Baidu)
+                                               │
+                                        ┌──────┴──────┐
+                                        │  offline?    │
+                                        └──────┬──────┘
+                                               │ yes
+                                    is_trusted_hitsz_wifi()
+                                    (macOS: SSID + BSSID allowlist)
+                                               │
+                                          login()
+                                          (Selenium ChromeDriver headless)
+                                               │
+                                          notify()
+                                          (macOS osascript notifications)
+                                               │
+                                          time.sleep(60)
+```
+
+- **Config lookup order** (fixed): CLI `--config` path > `~/.config/hitsz-autonet/.env` > `/etc/hitsz-autonet/.env` > `./.env`
+- **Wi-Fi identity gating** (macOS only): Before launching Selenium, verifies SSID matches `HITSZ_WIFI_SSID` (default `'HITSZ'`) and BSSID is in the comma-separated `HITSZ_WIFI_BSSIDS` allowlist. Prevents credential exposure on spoofed networks. Bypassed to `True` on non-macOS platforms.
+- **Selenium lifecycle**: `get_chromedriver_service()` tries `webdriver-manager` install, falls back to `~/.wdm` cached driver search (most recent by mtime), then PATH default. Chrome runs headless with `--no-sandbox --headless=undefined --disable-gpu --disable-dev-shm-usage` and a fixed Chrome 120 user-agent.
+- **Login verification**: JS checks `window.CONFIG.page == 'success'`, then 3x `check_internet()` retries with 2s gaps.
+- **Error handling**: Broad `except Exception` in most functions (logs, rarely propagates). `login()` has `try/finally` guaranteeing `driver.quit()`. ChromeDriver version mismatch gets a special critical log + notification.
+
+## Key Directories
+
+| Directory | Purpose |
+|-----------|---------|
+| `android-app/` | Android app: Gradle project, Kotlin source, shell scripts, debug docs |
+| `android-app/app/src/main/java/com/hitsz/autonet/ui/` | `MainActivity` — single screen |
+| `android-app/app/src/main/java/com/hitsz/autonet/service/` | Foreground service + boot/network receivers |
+| `android-app/app/src/main/java/com/hitsz/autonet/utils/` | `LoginManager`, `NetworkChecker`, `PreferencesManager` |
+| `hitsz_net/` | Legacy Python daemon: monolithic `hitsz_net.py`, `pyproject.toml`, `uv.lock` |
+| `service/` | macOS LaunchAgent installer (`install.py`) — wraps `hitsz_net.py` |
+| `research-findings/` | Archival research (~47 .md files, Jan 2026). Reference only; not source of truth |
+| `config/` | Empty — reserved for future config artifacts |
+| `scripts/` | Empty — reserved for future automation scripts |
+
+## Development Commands
+
+### Android
+
 ```bash
 cd android-app
+
+# Build
 export JAVA_HOME=/opt/homebrew/opt/openjdk@17
 export ANDROID_HOME=/opt/homebrew/share/android-commandlinetools
+./gradlew assembleDebug         # Debug APK
+./gradlew assembleRelease       # Release APK (with signing config)
+./gradlew lint                  # Static analysis
 
-./gradlew assembleDebug
-./gradlew assembleRelease
-./gradlew clean
-
+# Convenience scripts
+./build.sh                      # Clean assembleDebug with env vars pre-set
 adb install -r app/build/outputs/apk/debug/app-debug.apk
+
+# Debugging (require adb + connected device with USB debugging)
+./view-logs.sh                  # Filtered logcat with device check
+./clear-and-watch.sh            # Clear logs, start fresh stream
+./save-logs.sh                  # Capture 2 min of logs to timestamped file
+./install-and-test.sh           # Full install + log watching workflow
+./test-login.sh                 # Force-stop, clear logs, watch for login
+./quick-test.sh                 # Shorter variant of test-login.sh
 ```
 
-#### Testing Commands
-```bash
-./gradlew test
-./gradlew connectedAndroidTest
-./gradlew lint
-```
-
-#### Logging & Debugging
-```bash
-adb logcat | grep -E "LoginManager|NetworkMonitorService|NetworkChecker"
-adb logcat -c
-adb logcat -s NetworkMonitorService:I
-```
+All log scripts filter on three tags: `LoginManager|NetworkMonitorService|NetworkChecker`.
 
 ### Python Daemon
 
-#### Running the Script
 ```bash
-python3 hitsz_net/hitsz_net.py --once
-python3 hitsz_net/hitsz_net.py --daemon
-python3 hitsz_net/hitsz_net.py --config path/to/.env
-python3 hitsz_net/hitsz_net.py --update-driver
-```
+# Install deps (pick one)
+pip3 install -r requirements.txt
+# or: cd hitsz_net && uv sync
 
-#### Service Management (macOS)
-```bash
+# Run
+python3 hitsz_net/hitsz_net.py --once          # Single check + login
+python3 hitsz_net/hitsz_net.py --daemon        # Continuous loop
+python3 hitsz_net/hitsz_net.py --update-driver # Refresh ChromeDriver
+
+# macOS service management
 python3 service/install.py install --config .env
-python3 service/install.py status
 python3 service/install.py uninstall
-
-tail -f ~/Library/Logs/hitsz-autonet/service.log
-tail -f ~/Library/Logs/hitsz-autonet/error.log
+python3 service/install.py status
 ```
 
-#### Testing
-```bash
-python3 -c "from hitsz_net.hitsz_net import check_internet; print(check_internet())"
-python3 -c "from hitsz_net.hitsz_net import load_config; load_config('.env')"
-```
+Service logs: `~/Library/Logs/hitsz-autonet/service.log` and `error.log`.
 
-## Code Style Guidelines
+## Runtime/Toolchain Requirements
 
-### Android (Kotlin)
+| Component | Version/Tool | Notes |
+|-----------|-------------|-------|
+| Python | >=3.13 | Managed via `uv` (`hitsz_net/uv.lock`) or legacy `pip` (`requirements.txt`) |
+| Selenium | 4.39.0 | ChromeDriver via `webdriver-manager` (in `requirements.txt` but **not** in `pyproject.toml` — be aware of this drift) |
+| Kotlin | 2.0.0 | Android |
+| AGP | 8.5.0 | Android Gradle Plugin |
+| Gradle | 8.7 | Wrapper included |
+| compileSdk / targetSdk | 34 (Android 14) | |
+| minSdk | 24 (Android 7.0) | |
+| JDK | 17 (Homebrew path) | `JAVA_HOME=/opt/homebrew/opt/openjdk@17` |
+| Android SDK | Command-line tools (Homebrew) | `ANDROID_HOME=/opt/homebrew/share/android-commandlinetools` |
 
-#### File Organization
-```kotlin
-package com.hitsz.autonet.utils
+## Important Files
 
-import android.content.Context
-import android.util.Log
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+| File | Role |
+|------|------|
+| `hitsz_net/hitsz_net.py` | Python daemon: config, check, login, retry, notifications (~554 lines, monolithic) |
+| `hitsz_net/pyproject.toml` | Python project metadata + deps |
+| `hitsz_net/uv.lock` | Pinned transitive dependency versions |
+| `hitsz_net/.env.example` | Config template: `HITSZ_USERNAME`, `HITSZ_PASSWORD`, `HITSZ_WIFI_SSID`, `HITSZ_WIFI_BSSIDS` |
+| `requirements.txt` | Legacy pip deps (includes `webdriver-manager` that `pyproject.toml` omits) |
+| `service/install.py` | macOS LaunchAgent plist generator + lifecycle (label: `com.github.hitsz.autonet`) |
+| `android-app/app/build.gradle.kts` | Android dependencies, SDK versions, build config |
+| `android-app/app/src/main/AndroidManifest.xml` | Permissions, components, `foregroundServiceType="dataSync"` |
+| `android-app/app/src/main/res/xml/network_security_config.xml` | Cleartext allowed for `10.248.98.2` + `*.baidu.com` only |
+| `android-app/app/src/main/java/com/hitsz/autonet/service/NetworkMonitorService.kt` | Foreground service monitor loop, notifications |
+| `android-app/app/src/main/java/com/hitsz/autonet/utils/LoginManager.kt` | WebView login with JS injection, DOM fallbacks, connectivity verification |
+| `android-app/app/src/main/java/com/hitsz/autonet/utils/NetworkChecker.kt` | Two-tier connectivity check (Android APIs + OkHttp to Baidu) |
+| `android-app/app/src/main/java/com/hitsz/autonet/utils/PreferencesManager.kt` | DataStore-backed credentials + auto-start toggle |
+| `android-app/app/src/main/java/com/hitsz/autonet/service/BootReceiver.kt` | Auto-start service after boot if preference enabled |
+| `android-app/app/src/main/java/com/hitsz/autonet/service/NetworkChangeReceiver.kt` | Passive connectivity change logger (does **not** drive login) |
+| `android-app/app/src/main/java/com/hitsz/autonet/ui/MainActivity.kt` | Single `AppCompatActivity` entry point |
 
-class NetworkChecker(private val context: Context) {
-    companion object {
-        private const val TAG = "NetworkChecker"
-    }
-}
-```
+## Code Conventions & Common Patterns
 
-#### Naming Conventions
-- **Classes**: `PascalCase` (e.g., `NetworkMonitorService`, `LoginManager`)
-- **Functions**: `camelCase` (e.g., `checkInternet`, `startService`)
-- **Properties**: `camelCase` (e.g., `isRunning`, `checkInterval`)
-- **Constants**: `UPPER_SNAKE_CASE` (e.g., `CHECK_INTERVAL`, `LOGIN_URL`)
-- **Private members**: No underscore prefix (Kotlin convention)
-
-#### Formatting
-- **Indentation**: 4 spaces (no tabs)
-- **Line length**: 120 characters max
-- **Braces**: K&R style (opening brace on same line)
-
-#### Coroutines & Async
-```kotlin
-suspend fun checkInternet(): Boolean = withContext(Dispatchers.IO) {
-    try {
-        // Network operation
-    } catch (e: Exception) {
-        Log.e(TAG, "Error: ${e.message}")
-        false
-    }
-}
-```
-
-#### Logging
-```kotlin
-Log.d(TAG, "Debug message")
-Log.i(TAG, "Info message")
-Log.w(TAG, "Warning message")
-Log.e(TAG, "Error: ${exception.message}")
-```
-
-### Python Daemon
-
-#### Import Order
-```python
-import argparse
-import logging
-import os
-import subprocess
-import sys
-import time
-from pathlib import Path
-
-import requests
-from dotenv import load_dotenv
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.common.by import By
-from selenium.common.exceptions import WebDriverException
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
-from webdriver_manager.chrome import ChromeDriverManager
-```
-
-#### Formatting
-- **Line length**: 88 characters (Black default)
-- **Indentation**: 4 spaces (no tabs)
-- **String quotes**: Double quotes `"` for strings
-- **Trailing commas**: Omitted in single-line structures
-- **Blank lines**: 2 between top-level functions/classes
-
-#### Naming Conventions
-- **Functions/variables**: `snake_case` (e.g., `check_internet`, `log_file`)
-- **Classes**: `PascalCase` (e.g., `ServiceInstaller`)
-- **Constants**: `UPPER_SNAKE_CASE` (e.g., `LOGIN_URL`, `CHECK_URL`, `LABEL`)
-- **Private/internal**: Leading underscore `_helper_function`
-
-#### Error Handling
-```python
-try:
-    driver.get(LOGIN_URL)
-except WebDriverException as e:
-    logger.error(f"WebDriver error: {e}")
-except Exception as e:
-    logger.error(f"Unexpected error: {e}")
-finally:
-    driver.quit()
-```
-
-#### Logging
-- Use standard `logging` module, not `print()`
-- Log levels: `DEBUG` < `INFO` < `WARNING` < `ERROR` < `CRITICAL`
-- Format: `"%(asctime)s - %(levelname)s - %(message)s"`
-```python
-logger.info("Normal operation message")
-logger.warning("Something unusual but not fatal")
-logger.error("Operation failed")
-```
-
-#### Configuration
-- Credentials in `.env` files (never commit)
-- Default config paths checked in order:
-  1. `~/.config/hitsz-autonet/.env`
-  2. `/etc/hitsz-autonet/.env`
-  3. `./.env`
-- Use `pathlib.Path` for all file paths
-- Environment variables: `HITSZ_USERNAME`, `HITSZ_PASSWORD`
-
-#### Selenium Best Practices
-- Always use headless mode in production: `--headless`
-- Set explicit timeouts: `driver.set_page_load_timeout(30)`
-- Use `WebDriverWait` for element presence checks
-- Always `driver.quit()` in `finally` block
-- Prefer `execute_script("arguments[0].click()")` over `.click()` for reliability
-- Suppress Selenium logs: `logging.getLogger("selenium").setLevel(logging.ERROR)`
-
-## Project Structure
-
-### Android App
-```
-android-app/
-├── app/
-│   ├── src/main/
-│   │   ├── java/com/hitsz/autonet/
-│   │   │   ├── ui/
-│   │   │   │   └── MainActivity.kt
-│   │   │   ├── service/
-│   │   │   │   ├── NetworkMonitorService.kt
-│   │   │   │   ├── BootReceiver.kt
-│   │   │   │   └── NetworkChangeReceiver.kt
-│   │   │   └── utils/
-│   │   │       ├── NetworkChecker.kt
-│   │   │       ├── LoginManager.kt
-│   │   │       └── PreferencesManager.kt
-│   │   ├── res/
-│   │   │   ├── layout/activity_main.xml
-│   │   │   ├── values/strings.xml
-│   │   │   └── xml/network_security_config.xml
-│   │   └── AndroidManifest.xml
-│   └── build.gradle.kts
-└── README.md
-```
-
-### Python Daemon
-```
-hitsz_net/
-├── hitsz_net.py          # Main authentication script
-└── README.md
-
-service/
-└── install.py            # macOS LaunchAgent installer
-```
-
-## Key Implementation Details
-
-### Android Authentication Flow
-
-1. **Network Detection** (`NetworkChecker.kt`):
-   - Uses `ConnectivityManager` to check network state
-   - HTTP request to `baidu.com` to verify real internet access
-   - Detects captive portal via redirect/content mismatch
-
-2. **WebView-based Login** (`LoginManager.kt`):
-   - Loads `http://10.248.98.2` (redirects to mobile portal)
-   - Waits 2 seconds for Vue.js dynamic content
-   - JavaScript injection to fill form and submit
-   - Verification via network connectivity check (not page status)
-
-3. **Background Service** (`NetworkMonitorService.kt`):
-   - Runs as foreground service with notification
-   - 60-second check interval
-   - Auto-triggers login on connectivity loss
-
-### Python Authentication Flow
-
-1. **Network Detection** (`check_internet()`):
-   - HTTP request to `baidu.com`
-   - Checks response code and content
-   - Detects captive portal redirects
-
-2. **Selenium Login** (`login()`):
-   - Headless Chrome with explicit waits
-   - JavaScript-based form interaction
-   - Success verification via `window.CONFIG.page`
-
-3. **Daemon Loop**:
-   - 60-second interval checks
-   - AppleScript notifications on macOS
-   - LaunchAgent for auto-start
-
-## Platform-Specific Notes
-
-### Android
-- **Min SDK**: API 24 (Android 7.0)
-- **Target SDK**: API 34 (Android 14)
-- **Background limits**: Use foreground service to avoid Doze restrictions
-- **Battery optimization**: App should be exempted for reliable monitoring
-
-### macOS (Python - Primary)
-- Uses AppleScript for notifications: `osascript -e 'display notification...'`
-- LaunchAgent plist in `~/Library/LaunchAgents/`
-- Service runs on `NetworkState` change (KeepAlive)
-
-### Linux (Python - Secondary Support)
-- Notifications: Use `notify-send` or similar
-- Service management: systemd unit files
-- Config paths: `~/.config/hitsz-autonet/` or `/etc/hitsz-autonet/`
-
-## Key Files
-
-### Android
-- `android-app/app/src/main/java/com/hitsz/autonet/utils/LoginManager.kt` - WebView login logic
-- `android-app/app/src/main/java/com/hitsz/autonet/utils/NetworkChecker.kt` - Connectivity detection
-- `android-app/app/src/main/java/com/hitsz/autonet/service/NetworkMonitorService.kt` - Background service
-- `android-app/app/src/main/AndroidManifest.xml` - App configuration
-- `android-app/app/src/main/res/xml/network_security_config.xml` - HTTP cleartext permissions
+### Cross-Platform
+- Treat Android and Python as **parallel implementations** of the same operational flow, not interchangeable modules.
+- Canonical operational constants must stay aligned across platforms (login URL, check URL, 60s interval).
+- Do not commit `.env` or any credentials.
+- Do not assume HTTP 200 means internet access — captive-portal detection depends on redirect/content validation against Baidu.
 
 ### Python
-- `hitsz_net/hitsz_net.py` - Main authentication script
-- `service/install.py` - macOS LaunchAgent installer
-- `requirements.txt` - Python dependencies
-- `.env` - Credentials (git-ignored)
-
-### Documentation
-- `README.md` - Project overview
-- `AGENTS.md` - This file (development guide)
-- `android-app/README.md` - Comprehensive Android documentation
-- `android-app/BUILD.md` - Build instructions
-- `android-app/QUICKSTART.md` - Quick start guide
-- `hitsz_net/README.md` - Python daemon documentation
-
-## Development Workflow
+- **Monolithic**: All daemon logic in `hitsz_net.py` (~554 lines). No package tree, no modules.
+- **Synchronous**: Blocking `while True` loop with `time.sleep(60)`. No async, no threading, no concurrency.
+- **Error handling**: Broad `except Exception` in most functions. Logs and continues. Only ChromeDriver version mismatch gets a critical-level log.
+- **Config**: `python-dotenv` loading. Env var keys: `HITSZ_USERNAME`, `HITSZ_PASSWORD`, `HITSZ_WIFI_SSID` (default `'HITSZ'`), `HITSZ_WIFI_BSSIDS` (comma-separated).
+- **Logging**: `force=True` `basicConfig` with `%Y-%m-%d %H:%M:%S` format. Selenium/urllib3 suppressed to `ERROR`. Daemon mode logs to file; once mode to stdout.
+- **macOS-specific paths**: Airport Wi-Fi via `networksetup` + `/System/Library/PrivateFrameworks/Apple80211.framework/Resources/airport`. Notifications via `osascript -e 'display notification'`. LaunchAgent plist at `~/Library/LaunchAgents/com.github.hitsz.autonet.plist`.
 
 ### Android
-1. **Setup**: Create credentials in app UI
-2. **Test**: Run in Android Studio with connected device
-3. **Debug**: Use `adb logcat` with filtered tags
-4. **Build**: Generate APK with gradle
-5. **Install**: Deploy via `adb install`
+- **Manual DI**: No Hilt, no Koin, no Dagger. Dependencies created in `onCreate` and passed explicitly.
+- **No Navigation, No ViewModel**: Single `AppCompatActivity` with manual `findViewById`. `ViewBinding` compile flag enabled but unused.
+- **Coroutine patterns**: `NetworkMonitorService` uses a custom `CoroutineScope(Dispatchers.Default + Job())`. `BootReceiver` fires-and-forgets with a fresh `CoroutineScope`. `MainActivity` uses `lifecycleScope`.
+- **`suspendCancellableCoroutine`**: Used in `LoginManager` to bridge WebView callbacks (`onPageFinished`, `onReceivedError`) into coroutine suspension.
+- **DataStore**: `preferencesDataStore` delegate extension on `Context`. Three keys: `username`, `password`, `auto_start`.
+- **Foreground service**: `START_STICKY` return. Notification channel `hitsz_autonet_channel` (LOW importance). Notification icon: `android.R.drawable.ic_dialog_info` (no custom icon).
+- **WebView login**: `Handler(Looper.getMainLooper()).postDelayed()` for delayed DOM readiness — NOT `view.postDelayed()` (project docs explicitly call this out).
+- **Network security**: Cleartext scoped to `10.248.98.2` + `*.baidu.com` via `network_security_config.xml`. Do NOT broaden this.
 
-### Python
-1. **Setup**: Create `.env` with credentials
-2. **Test**: Run with `--once` flag first
-3. **Iterate**: Modify code, test with direct invocation
-4. **Service**: Install as LaunchAgent only after validation
-5. **Debug**: Check logs in `~/Library/Logs/hitsz-autonet/`
+### Shell Scripts
+- All Android scripts live under `android-app/`. Depend on `adb` on PATH and a connected device.
+- Hard-coded Homebrew paths for JDK 17 and Android SDK (macOS development environment).
+- `install-and-test.sh` has a maintainer-specific absolute APK path — do not replicate this pattern.
+- Log filter tag triple (`LoginManager|NetworkMonitorService|NetworkChecker`) is hard-coded across all log scripts.
 
-## Common Pitfalls
+## Anti-Patterns
 
-### Android
-1. **WebView postDelayed issues**: Use `Handler(Looper.getMainLooper()).postDelayed()` instead of `view.postDelayed()`
-2. **Cleartext HTTP blocked**: Ensure `network_security_config.xml` properly configured
-3. **Background restrictions**: Android 12+ limits background work, use foreground service
-4. **Permission issues**: Request runtime permissions for notifications
-5. **Form detection**: Don't rely on page config - verify by testing actual network connectivity
+- Do not commit `.env` or any credentials.
+- Do not treat `research-findings/` as maintained application code or source of truth.
+- Do not assume HTTP 200 means internet access.
+- Do not break cross-platform constant parity when changing login URL, connectivity target, or retry interval.
+- Do not remove or broaden `network_security_config.xml`; the cleartext exception is intentionally narrow.
+- Do not switch WebView delayed handling to `view.postDelayed()`.
+- Do not treat `NetworkChangeReceiver` as the primary orchestration path — it is passive.
+- Do not add child AGENTS.md files under `hitsz_net/`, `service/`, `ui/`, or `utils/` unless those areas stop being single-purpose.
+- Do not hardcode new absolute user paths in scripts.
 
-### Python
-1. **ChromeDriver mismatch**: Run `--update-driver` when Chrome updates
-2. **Offline driver updates**: Can't auto-update without internet - use mobile hotspot
-3. **Missing config**: Service fails silently if `.env` not found
-4. **Captive portal false positives**: `check_internet()` validates Baidu content, not just HTTP 200
-5. **Permission issues**: Ensure script is executable, paths are absolute in plist
+## Testing & QA
 
-## Extending the Project
-
-### Android
-- **New network detection**: Extend `NetworkChecker.checkInternet()`
-- **Additional notifications**: Modify `NetworkMonitorService.sendNotification()`
-- **UI improvements**: Update `activity_main.xml` and `MainActivity`
-- **Custom intervals**: Add configuration option in `PreferencesManager`
-
-### Python
-- Add new network detection methods in `check_internet()`
-- Support additional notification backends in `notify()`
-- Implement retry strategies in `login()`
-- Add structured logging (JSON format for parsing)
-- Create pytest test suite for core functions
-
-## Acknowledgments
-
-Python daemon inspired by original [hitsz_net](https://github.com/siliconx/hitsz_net) project by siliconx.
+- **Python daemon**: No formal test suite. Manual verification via `--once` flag and log inspection.
+- **Android app**: Test dependencies declared in `build.gradle.kts` (JUnit, Espresso) but **no real test classes exist** in `src/test/` or `src/androidTest/`. All validation is manual on-device testing with `adb logcat` filtering.
+- **Debug workflow**: See `android-app/DEBUG.md` for the operational debugging guide — covers DNS issues, cleartext blocks, form structure changes, WebView DevTools debugging.
+- The project has no CI pipeline. Builds, linting, and testing are developer-driven.

@@ -33,7 +33,11 @@ pip3 install -r requirements.txt
 ```bash
 HITSZ_USERNAME=your_username
 HITSZ_PASSWORD=your_password
+HITSZ_WIFI_SSID=HITSZ
+HITSZ_WIFI_BSSIDS=aa:bb:cc:dd:ee:ff,11:22:33:44:55:66
 ```
+
+`HITSZ_WIFI_BSSIDS` is a required comma-separated allowlist for trusted campus access points on macOS. The daemon now requires both the expected SSID and a trusted BSSID match before it will attempt portal login, so SSID spoofing alone will not trigger Selenium login attempts.
 
 Configuration file locations (checked in order):
 - `~/.config/hitsz-autonet/.env`
@@ -98,6 +102,8 @@ tail -f ~/Library/Logs/hitsz-autonet/service.log
 
 - `HITSZ_USERNAME` - Campus network username
 - `HITSZ_PASSWORD` - Campus network password
+- `HITSZ_WIFI_SSID` - Expected campus Wi-Fi SSID on macOS (defaults to `HITSZ` if omitted)
+- `HITSZ_WIFI_BSSIDS` - Comma-separated trusted BSSID allowlist for macOS Wi-Fi login gating
 
 ### Service Configuration
 
@@ -132,6 +138,12 @@ Note: ChromeDriver updates require internet access. If you're offline due to cap
 2. Check if campus portal is accessible: `http://10.248.98.2`
 3. Test with `--once` flag for detailed output
 4. Check logs for specific error messages
+
+### Login Never Starts on macOS
+
+1. Confirm you are connected to the expected SSID from `HITSZ_WIFI_SSID`
+2. Confirm the current access point BSSID is included in `HITSZ_WIFI_BSSIDS`
+3. Check daemon logs for messages about untrusted SSID or BSSID skips
 
 ## Platform Support
 

@@ -155,13 +155,21 @@ class ServiceInstaller:
             result = subprocess.run(
                 ["launchctl", "list", LABEL], capture_output=True, text=True
             )
-            if result.returncode == 0:
-                print(
-                    f"Service is running. PID: {result.stdout.split()[0] if result.stdout else 'Unknown'}"
-                )
-                print(f"Logs are in: {self.log_dir}")
-            else:
+            if result.returncode != 0:
                 print("Service is not running.")
+                return
+
+            import re
+            pid_match = re.search(r'"PID"\s*=\s*(\d+)', result.stdout)
+            exit_match = re.search(r'"LastExitStatus"\s*=\s*(\d+)', result.stdout)
+            pid = pid_match.group(1) if pid_match else "unknown"
+            exit_code = exit_match.group(1) if exit_match else "unknown"
+
+            if pid != "unknown":
+                print(f"Service is running.  PID: {pid}  Last exit: {exit_code}")
+            else:
+                print("Service is loaded but not currently running.")
+            print(f"Logs: {self.log_dir}")
         except Exception as e:
             print(f"Error checking status: {e}")
 

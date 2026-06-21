@@ -80,3 +80,9 @@ android-app/output.json
 
 # Research/temporary files
 research-findings/
+
+# Local data
+banks/
+
+# Project placeholder (remove when real)
+main.py

@@ -2,21 +2,24 @@
 import time
 import os
 import sys
+import json
+import random
 import logging
 import argparse
 import subprocess
 import requests
 from pathlib import Path
 from dotenv import load_dotenv
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.common.exceptions import WebDriverException
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
+from srun_crypto import (
+    srun_xencode,
+    srun_base64,
+    srun_hmac_md5,
+    srun_sha1,
+    generate_callback,
+    parse_jsonp,
+)
 
 # Configure logging
-logging.getLogger("selenium").setLevel(logging.ERROR)
 logging.getLogger("urllib3").setLevel(logging.ERROR)
 
 # Default config paths
@@ -52,6 +55,10 @@ def setup_logging(is_daemon=False, log_file=None):
 
 
 logger = logging.getLogger(__name__)
+
+
+
+
 
 
 def load_config(config_path=None):
@@ -118,69 +125,9 @@ def check_internet():
         return False
 
 
-def find_cached_driver():
-    """
-    Search for the latest 'chromedriver' in ~/.wdm directory.
-    Returns path as string if found, else None.
-    """
-    try:
-        wdm_dir = Path.home() / ".wdm"
-        if not wdm_dir.exists():
-            return None
-
-        # Recursively find all 'chromedriver' files
-        candidates = []
-        for path in wdm_dir.rglob("chromedriver"):
-            if path.is_file() and os.access(path, os.X_OK):
-                candidates.append(path)
-
-        if not candidates:
-            return None
-
-        # Sort by modification time (newest first) to likely get the latest version
-        # Or we could try to parse version from path, but mtime is a decent proxy for "most recently downloaded"
-        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-
-        best_candidate = candidates[0]
-        logger.info(f"Found cached driver at: {best_candidate}")
-        return str(best_candidate)
-
-    except Exception as e:
-        logger.warning(f"Error searching for cached driver: {e}")
-        return None
-
-
-def get_chromedriver_service(force_update=False):
-    """
-    Initialize ChromeDriver service, optionally handling updates.
-    """
-    service = None
-    try:
-        # Try to install/update driver via webdriver_manager if connected or forced
-        # This handles downloading the correct version for current Chrome
-        # We only try update if force_update is True or we likely have internet (not strictly checked here, but let manager handle it)
-        install_path = ChromeDriverManager().install()
-        service = Service(install_path)
-        logger.info(f"ChromeDriver initialized/updated at: {install_path}")
-    except Exception as e:
-        logger.warning(f"Failed to install/update ChromeDriver via manager: {e}")
-
-        # Try to find cached driver manually
-        cached_path = find_cached_driver()
-        if cached_path:
-            logger.info(f"Using manually located cached driver: {cached_path}")
-            service = Service(executable_path=cached_path)
-        else:
-            logger.info("Attempting to use system default 'chromedriver'...")
-            # Fallback to default service (looks in PATH)
-            service = Service()
-
-    return service
-
-
 def login(username, password):
     """
-    Perform login using Selenium.
+    Perform login using the Srun HTTP API.
     Returns True if successful, False otherwise.
     """
     if not username or not password:
@@ -189,111 +136,138 @@ def login(username, password):
         return False
 
     logger.info("Attempting to login...")
-    driver = None
+
+    def request_timestamp():
+        return int(time.time() * 1000) + random.randint(0, 999)
+
     try:
-        chrome_options = Options()
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--headless")
-        chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        # Use a consistent User-Agent
-        chrome_options.add_argument(
-            "user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        callback = generate_callback()
+
+        # Step 1: Get the current portal-side IP address.
+        response = requests.get(
+            "http://10.248.98.2/cgi-bin/rad_user_info",
+            params={"callback": callback, "_": request_timestamp()},
+            timeout=10,
         )
-
-        service = get_chromedriver_service(force_update=False)
-
-        driver = webdriver.Chrome(service=service, options=chrome_options)
-        driver.set_page_load_timeout(30)
-
-        driver.get(LOGIN_URL)
-        time.sleep(2)  # Wait for page load
-
-        # Check if already logged in (based on previous logic)
-        try:
-            config = driver.execute_script("return window.CONFIG;")
-            if config and config.get("page") == "success":
-                logger.info("Already logged in (page status).")
-                return True
-        except Exception:
-            pass  # Continue to login if check fails
-
-        # Input credentials
-        # Wait for username field to be present
-        try:
-            from selenium.webdriver.support.ui import WebDriverWait
-            from selenium.webdriver.support import expected_conditions as EC
-
-            wait = WebDriverWait(driver, 10)
-            username_input = wait.until(
-                EC.presence_of_element_located((By.ID, "username"))
-            )
-            username_input.clear()
-            username_input.send_keys(username)
-
-            pwd_input = driver.find_element(By.ID, "password")
-            pwd_input.clear()
-            pwd_input.send_keys(password)
-
-            # Click login using JS to avoid interception
-            login_btn = driver.find_element(By.ID, "login-account")
-            driver.execute_script("arguments[0].click();", login_btn)
-
-            time.sleep(3)  # Wait for login to process
-        except Exception as e:
-            logger.error(f"Error interacting with login form: {e}")
-            # Save screenshot for debug
-            # driver.save_screenshot("login_error.png")
+        user_info = parse_jsonp(response.text)
+        if not user_info:
+            logger.warning("Failed to parse Srun user info response.")
             return False
 
-        # Verify login success
-        # 1. Check page status via JS
-        try:
-            config = driver.execute_script("return window.CONFIG;")
-            if config and config.get("page") == "success":
-                logger.info("Login successful (page status).")
-                return True
-        except Exception:
-            pass
+        ip = user_info.get("online_ip")
+        if not ip:
+            logger.warning("Srun user info response did not include online_ip.")
+            return False
 
-        # 2. Fallback: Check connectivity directly
-        logger.warning(
-            "Page status verification failed, checking actual connectivity..."
+        # Step 2: Get the per-login challenge token.
+        response = requests.get(
+            "http://10.248.98.2/cgi-bin/get_challenge",
+            params={
+                "callback": callback,
+                "username": username,
+                "ip": ip,
+                "_": request_timestamp(),
+            },
+            timeout=10,
         )
-        for _ in range(3):
-            if check_internet():
-                logger.info("Login successful (connectivity verified).")
-                return True
-            time.sleep(2)
+        challenge_info = parse_jsonp(response.text)
+        if not challenge_info:
+            logger.warning("Failed to parse Srun challenge response.")
+            return False
 
-        logger.error(
-            "Login failed: Page status not success and connectivity check failed."
+        token = challenge_info.get("challenge")
+        if not token:
+            logger.warning("Srun challenge response did not include challenge token.")
+            return False
+
+        # Step 3: Compute the encrypted login parameters.
+        ac_id = "1"
+        n = "200"
+        login_type = "1"
+        hmd5 = srun_hmac_md5(password, token)
+        info_json = json.dumps(
+            {
+                "username": username,
+                "password": password,
+                "ip": ip,
+                "acid": ac_id,
+                "enc_ver": "srun_bx1",
+            },
+            separators=(",", ":"),
         )
+        info = "{SRBX1}" + srun_base64(srun_xencode(info_json, token))
+        chkstr = (
+            token
+            + username
+            + token
+            + hmd5
+            + token
+            + ac_id
+            + token
+            + ip
+            + token
+            + n
+            + token
+            + login_type
+            + token
+            + info
+        )
+        chksum = srun_sha1(chkstr)
+
+        # Step 4: Submit the login request.
+        response = requests.get(
+            "http://10.248.98.2/cgi-bin/srun_portal",
+            params={
+                "callback": callback,
+                "action": "login",
+                "username": username,
+                "password": "{MD5}" + hmd5,
+                "ac_id": ac_id,
+                "ip": ip,
+                "chksum": chksum,
+                "info": info,
+                "n": n,
+                "type": login_type,
+                "os": "macOS+15",
+                "name": "Mac",
+                "double_stack": "0",
+                "_": request_timestamp(),
+            },
+            timeout=10,
+        )
+        login_info = parse_jsonp(response.text)
+        if not login_info:
+            logger.warning("Failed to parse Srun login response.")
+            return False
+
+        success_message = login_info.get("suc_msg")
+        if success_message:
+            success_message_lower = success_message.lower()
+            if "login_ok" in success_message_lower or "success" in success_message_lower:
+                logger.info(f"Login successful: {success_message}")
+                return True
+
+        error_message = login_info.get("error")
+        if error_message:
+            logger.warning(f"Login failed: {error_message}")
+            return False
+
+        logger.warning("Srun login response ambiguous, checking actual connectivity...")
+        if check_internet():
+            logger.info("Login successful (connectivity verified).")
+            return True
+
+        logger.error("Login failed: Srun response ambiguous and connectivity check failed.")
         return False
 
-    except WebDriverException as e:
-        logger.error(f"WebDriver error during login: {e}")
-        if "This version of ChromeDriver only supports Chrome version" in str(e):
-            logger.critical(
-                "\n"
-                "CRITICAL ERROR: ChromeDriver version mismatch detected.\n"
-                "You are currently OFFLINE, so the script cannot auto-update the driver.\n"
-                "SOLUTION:\n"
-                "1. Connect to a mobile hotspot or other network temporarily.\n"
-                "2. Run the script once to let it download the correct driver.\n"
-                "3. OR manually download ChromeDriver matching your Chrome version and place it in PATH."
-            )
-            notify("HITSZ Net", "Driver Mismatch! Check logs.")
+    except requests.RequestException as e:
+        logger.warning(f"Login request error: {e}")
         return False
     except Exception as e:
         logger.error(f"Unexpected error during login: {e}")
         return False
     finally:
-        if driver:
-            try:
-                driver.quit()
-            except Exception:
-                pass
+        pass
 
 
 def main():
@@ -321,20 +295,10 @@ def main():
 
     logger.info("HITSZ AutoNet Monitor starting...")
 
-    # Handle driver update request
+    # Handle deprecated driver update request
     if args.update_driver:
-        logger.info("Updating ChromeDriver...")
-        try:
-            service = get_chromedriver_service(force_update=True)
-            if service:
-                logger.info("ChromeDriver update process completed.")
-                sys.exit(0)
-            else:
-                logger.error("ChromeDriver update failed.")
-                sys.exit(1)
-        except Exception as e:
-            logger.error(f"Error during driver update: {e}")
-            sys.exit(1)
+        logger.info("ChromeDriver no longer required since v2.0 (HTTP-based login). This flag is deprecated and has no effect.")
+        sys.exit(0)
 
     # Load config
     load_config(args.config)
@@ -358,7 +322,6 @@ def main():
 
                 if login(username, password):
                     notify("HITSZ Net", "Login successful. You are back online.")
-                    # Double check
                     if check_internet():
                         logger.info("Connectivity verified.")
                     else:
@@ -368,7 +331,7 @@ def main():
                 else:
                     notify("HITSZ Net", "Login failed. Will retry.")
             else:
-                logger.debug("Connectivity OK.")
+                logger.info("Connectivity OK — no login needed.")
 
         except KeyboardInterrupt:
             logger.info("Stopping monitor...")
@@ -377,6 +340,7 @@ def main():
             logger.error(f"Main loop error: {e}")
 
         if args.once:
+            logger.info("Single check complete. Exiting.")
             break
 
         # Wait for 60 seconds
