@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import threading
 import time
 import os
 import sys
@@ -33,6 +34,27 @@ LOGIN_URL = "http://10.248.98.2/srun_portal_pc?ac_id=1&theme=basic2"
 CHECK_URL = "http://www.baidu.com"
 
 
+def watch_lid_events(stop_event, wake_event):
+    """Background thread: detect lid-open events via ioreg polling (macOS only)."""
+    was_closed = False
+    while not stop_event.is_set():
+        try:
+            result = subprocess.run(
+                ["ioreg", "-r", "-k", "AppleClamshellState", "-d", "1"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            is_closed = '"AppleClamshellState" = Yes' in result.stdout
+            if was_closed and not is_closed:
+                logger.info("Lid opened — triggering connectivity check.")
+                wake_event.set()
+            was_closed = is_closed
+        except Exception:
+            pass
+        stop_event.wait(timeout=2)
+
+
 def setup_logging(is_daemon=False, log_file=None):
     """Configure logging based on mode."""
     handlers = []
@@ -55,10 +77,6 @@ def setup_logging(is_daemon=False, log_file=None):
 
 
 logger = logging.getLogger(__name__)
-
-
-
-
 
 
 def load_config(config_path=None):
@@ -243,7 +261,10 @@ def login(username, password):
         success_message = login_info.get("suc_msg")
         if success_message:
             success_message_lower = success_message.lower()
-            if "login_ok" in success_message_lower or "success" in success_message_lower:
+            if (
+                "login_ok" in success_message_lower
+                or "success" in success_message_lower
+            ):
                 logger.info(f"Login successful: {success_message}")
                 return True
 
@@ -257,7 +278,9 @@ def login(username, password):
             logger.info("Login successful (connectivity verified).")
             return True
 
-        logger.error("Login failed: Srun response ambiguous and connectivity check failed.")
+        logger.error(
+            "Login failed: Srun response ambiguous and connectivity check failed."
+        )
         return False
 
     except requests.RequestException as e:
@@ -277,13 +300,25 @@ def main():
         "--daemon",
         "-d",
         action="store_true",
-        help="Run in background (doesn't fork, just implies service mode)",
+        help="Run as service (implies continuous mode)",
     )
-    parser.add_argument("--once", "-o", action="store_true", help="Run once and exit")
+    parser.add_argument("--once", "-o", action="store_true", help="Check once and exit")
+    parser.add_argument(
+        "--interval",
+        "-i",
+        type=int,
+        default=60,
+        help="Check interval in seconds (default: 60, 0 = no auto checks)",
+    )
+    parser.add_argument(
+        "--wake",
+        action="store_true",
+        help="Also trigger check on lid-open / wake from sleep (macOS only)",
+    )
     parser.add_argument(
         "--update-driver",
         action="store_true",
-        help="Force update ChromeDriver and exit",
+        help="Deprecated: ChromeDriver no longer required",
     )
     parser.add_argument("--log-file", help="Path to log file")
 
@@ -292,20 +327,17 @@ def main():
     # Setup logging
     global logger
     logger = setup_logging(is_daemon=args.daemon, log_file=args.log_file)
-
     logger.info("HITSZ AutoNet Monitor starting...")
 
-    # Handle deprecated driver update request
     if args.update_driver:
-        logger.info("ChromeDriver no longer required since v2.0 (HTTP-based login). This flag is deprecated and has no effect.")
+        logger.info(
+            "ChromeDriver no longer required (HTTP-based login). This flag is deprecated."
+        )
         sys.exit(0)
 
-    # Load config
     load_config(args.config)
-
     username = os.getenv("HITSZ_USERNAME")
     password = os.getenv("HITSZ_PASSWORD")
-
     if not username or not password:
         logger.error(
             "Please configure .env file with HITSZ_USERNAME and HITSZ_PASSWORD"
@@ -313,26 +345,39 @@ def main():
         notify("HITSZ Net", "Please configure credentials")
         sys.exit(1)
 
+    interval = args.interval
+    wake_event = threading.Event()
+    stop_event = threading.Event()
+    watcher = None
+
+    if args.wake:
+        watcher = threading.Thread(
+            target=watch_lid_events, args=(stop_event, wake_event), daemon=True
+        )
+        watcher.start()
+        logger.info("Lid-open watcher started.")
+
+    def run_check():
+        if not check_internet():
+            logger.info("Internet unavailable. Initiating login sequence...")
+            notify("HITSZ Net", "Network lost. Attempting login...")
+            if login(username, password):
+                notify("HITSZ Net", "Login successful. You are back online.")
+                if check_internet():
+                    logger.info("Connectivity verified.")
+                else:
+                    logger.warning(
+                        "Login reported success but connectivity check failed."
+                    )
+            else:
+                notify("HITSZ Net", "Login failed. Will retry.")
+        else:
+            logger.info("Connectivity OK — no login needed.")
+
     # Main loop
     while True:
         try:
-            if not check_internet():
-                logger.info("Internet unavailable. Initiating login sequence...")
-                notify("HITSZ Net", "Network lost. Attempting login...")
-
-                if login(username, password):
-                    notify("HITSZ Net", "Login successful. You are back online.")
-                    if check_internet():
-                        logger.info("Connectivity verified.")
-                    else:
-                        logger.warning(
-                            "Login reported success but connectivity check failed."
-                        )
-                else:
-                    notify("HITSZ Net", "Login failed. Will retry.")
-            else:
-                logger.info("Connectivity OK — no login needed.")
-
+            run_check()
         except KeyboardInterrupt:
             logger.info("Stopping monitor...")
             break
@@ -343,8 +388,19 @@ def main():
             logger.info("Single check complete. Exiting.")
             break
 
-        # Wait for 60 seconds
-        time.sleep(60)
+        if interval == 0 and not args.wake:
+            logger.info("No interval or wake trigger configured. Exiting.")
+            break
+
+        triggered = False
+        if args.wake:
+            timeout = interval if interval > 0 else None
+            triggered = wake_event.wait(timeout=timeout)
+            if triggered:
+                wake_event.clear()
+                logger.info("Wake event triggered.")
+        elif interval > 0:
+            time.sleep(interval)
 
 
 if __name__ == "__main__":

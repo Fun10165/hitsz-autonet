@@ -27,7 +27,7 @@ PLIST_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
         <string>--daemon</string>
         <string>--config</string>
         <string>{config_path}</string>
-    </array>
+{extra_args}
     
     <key>RunAtLoad</key>
     <true/>
@@ -74,10 +74,11 @@ PLIST_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
 
 
 class ServiceInstaller:
-    def __init__(self, script_path, config_path, interval=60):
+    def __init__(self, script_path, config_path, interval=60, extra_args=None):
         self.script_path = Path(script_path).resolve()
         self.config_path = Path(config_path).resolve()
         self.interval = interval
+        self.extra_args = extra_args or []
         self.home = Path.home()
         self.log_dir = self.home / "Library" / "Logs" / "hitsz-autonet"
         self.plist_path = self.home / "Library" / "LaunchAgents" / f"{LABEL}.plist"
@@ -99,6 +100,7 @@ class ServiceInstaller:
         print(f"Log directory created: {self.log_dir}")
 
         # 3. Generate Plist
+        extra = "".join(f"        <string>{a}</string>\n" for a in self.extra_args)
         plist_content = PLIST_TEMPLATE.format(
             label=LABEL,
             python_path=sys.executable,
@@ -109,6 +111,7 @@ class ServiceInstaller:
             log_err=self.log_dir / "error.log",
             home=self.home,
             work_dir=self.script_path.parent,
+            extra_args=extra,
         )
 
         # 4. Write Plist
@@ -160,6 +163,7 @@ class ServiceInstaller:
                 return
 
             import re
+
             pid_match = re.search(r'"PID"\s*=\s*(\d+)', result.stdout)
             exit_match = re.search(r'"LastExitStatus"\s*=\s*(\d+)', result.stdout)
             pid = pid_match.group(1) if pid_match else "unknown"
@@ -191,6 +195,17 @@ def main():
         default="./hitsz_net/hitsz_net.py",
         help="Path to hitsz_net.py",
     )
+    install_parser.add_argument(
+        "--wake",
+        action="store_true",
+        help="Trigger check on lid-open / wake from sleep",
+    )
+    install_parser.add_argument(
+        "--interval",
+        type=int,
+        default=60,
+        help="Check interval in seconds (default: 60)",
+    )
 
     # Uninstall command
     subparsers.add_parser("uninstall", help="Stop and remove the service")
@@ -200,11 +215,13 @@ def main():
 
     args = parser.parse_args()
 
-    # Default paths resolution
-    script_path = args.script if hasattr(args, "script") else "./hitsz_net/hitsz_net.py"
-    config_path = args.config if hasattr(args, "config") else ""
+    extra_args = []
+    if hasattr(args, "wake") and args.wake:
+        extra_args.append("--wake")
+    if hasattr(args, "interval") and args.interval != 60:
+        extra_args.extend(["--interval", str(args.interval)])
 
-    installer = ServiceInstaller(script_path, config_path)
+    installer = ServiceInstaller(script_path, config_path, extra_args=extra_args)
 
     if args.command == "install":
         installer.install()
