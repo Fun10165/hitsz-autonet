@@ -117,28 +117,22 @@ def notify(title, message):
 
 def check_internet():
     """
-    Check connectivity by pinging a known site.
-    Returns True if connected, False otherwise.
+    Check connectivity by probing baidu.com.
+    Returns True if connected, False if captive portal / no network.
     """
     try:
-        # We allow redirects because http://www.baidu.com might redirect to https://
-        # or the network might redirect to a captive portal.
         response = requests.get(CHECK_URL, timeout=10)
-
-        # 1. Check status code
         if response.status_code != 200:
             logger.info(f"Connectivity check failed: Status {response.status_code}")
             return False
-
-        # 2. Check if we are actually on Baidu (and not a captive portal login page)
-        # Captive portals often return 200 OK but with their own content.
         if "baidu.com" in response.url or "百度" in response.text:
             return True
-        else:
-            logger.info(f"Connectivity check failed: Redirected to {response.url}")
-            return False
-
+        logger.info(f"Connectivity check failed: Redirected to {response.url}")
+        return False
     except requests.RequestException as e:
+        # DNS resolution might fail if macOS set a non-working DNS server
+        # (e.g. 114.114.114.114) before portal login. Don't treat this as
+        # "connected" — it means we need to log in.
         logger.warning(f"Connectivity check error: {e}")
         return False
 
