@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import socket
 import threading
 import time
 import os
@@ -32,6 +33,21 @@ DEFAULT_CONFIG_PATHS = [
 
 LOGIN_URL = "http://10.248.98.2/srun_portal_pc?ac_id=1&theme=basic2"
 CHECK_URL = "http://www.baidu.com"
+
+# Force-resolve net.hitsz.edu.cn to the portal IP, bypassing broken system DNS
+# (macOS may set 114.114.114.114 which is unreachable before portal login)
+_PORTAL_IP = "10.248.98.2"
+_DNS_OVERRIDE = {"net.hitsz.edu.cn": _PORTAL_IP}
+_orig_getaddrinfo = socket.getaddrinfo
+
+
+def _patched_getaddrinfo(host, *args, **kwargs):
+    if host in _DNS_OVERRIDE:
+        return _orig_getaddrinfo(_DNS_OVERRIDE[host], *args, **kwargs)
+    return _orig_getaddrinfo(host, *args, **kwargs)
+
+
+socket.getaddrinfo = _patched_getaddrinfo
 
 
 def watch_lid_events(stop_event, wake_event):
@@ -150,6 +166,10 @@ def login(username, password):
     def request_timestamp():
         return int(time.time() * 1000) + random.randint(0, 999)
 
+    session = requests.Session()
+    session.verify = False  # Portal cert is for net.hitsz.edu.cn, we connect via IP
+    logging.getLogger("urllib3").setLevel(logging.ERROR)
+
     max_retries = 3
     for attempt in range(1, max_retries + 1):
         logger.info(f"Attempting to login... (attempt {attempt}/{max_retries})")
@@ -157,16 +177,11 @@ def login(username, password):
             callback = generate_callback()
 
             # Step 1: Get the current portal-side IP address.
-            response = requests.get(
+            response = session.get(
                 "http://10.248.98.2/cgi-bin/rad_user_info",
                 params={"callback": callback, "_": request_timestamp()},
                 timeout=10,
-                allow_redirects=False,
             )
-            if response.is_redirect:
-                raise requests.RequestException(
-                    f"Portal redirected (HTTP {response.status_code}) — network not ready yet"
-                )
             user_info = parse_jsonp(response.text)
             if not user_info:
                 raise requests.RequestException(
@@ -180,7 +195,7 @@ def login(username, password):
                 )
 
             # Step 2: Get the per-login challenge token.
-            response = requests.get(
+            response = session.get(
                 "http://10.248.98.2/cgi-bin/get_challenge",
                 params={
                     "callback": callback,
@@ -189,12 +204,7 @@ def login(username, password):
                     "_": request_timestamp(),
                 },
                 timeout=10,
-                allow_redirects=False,
             )
-            if response.is_redirect:
-                raise requests.RequestException(
-                    f"Portal redirected (HTTP {response.status_code}) — network not ready yet"
-                )
             challenge_info = parse_jsonp(response.text)
             if not challenge_info:
                 raise requests.RequestException(
@@ -240,7 +250,7 @@ def login(username, password):
             chksum = srun_sha1(chkstr)
 
             # Step 4: Submit the login request.
-            response = requests.get(
+            response = session.get(
                 "http://10.248.98.2/cgi-bin/srun_portal",
                 params={
                     "callback": callback,
@@ -259,12 +269,7 @@ def login(username, password):
                     "_": request_timestamp(),
                 },
                 timeout=10,
-                allow_redirects=False,
             )
-            if response.is_redirect:
-                raise requests.RequestException(
-                    f"Portal redirected (HTTP {response.status_code}) — network not ready yet"
-                )
             login_info = parse_jsonp(response.text)
             if not login_info:
                 raise requests.RequestException("Failed to parse Srun login response")
