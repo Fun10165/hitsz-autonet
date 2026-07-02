@@ -215,11 +215,13 @@ def main():
     subparsers.add_parser("status", help="Check service status")
 
     args = parser.parse_args()
+    script_path = getattr(args, "script", "./hitsz_net/hitsz_net.py")
+    config_path = getattr(args, "config", ".env")
 
     extra_args = []
-    if hasattr(args, "wake") and args.wake:
+    if getattr(args, "wake", False):
         extra_args.append("--wake")
-    if hasattr(args, "interval") and args.interval != 60:
+    if getattr(args, "interval", 60) != 60:
         extra_args.extend(["--interval", str(args.interval)])
 
     script_path = args.script if hasattr(args, "script") else "./hitsz_net/hitsz_net.py"

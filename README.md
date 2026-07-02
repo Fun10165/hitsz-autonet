@@ -29,11 +29,11 @@ EOF
 uv run hitsz_net/hitsz_net.py --once
 
 # Install as background service (auto-starts on boot)
-uv run python service/install.py install --config .env
+uv run service/install.py install --config .env
 
 # Manage
-uv run python service/install.py status
-uv run python service/install.py uninstall
+uv run service/install.py status
+uv run service/install.py uninstall
 ```
 
 Logs: `~/Library/Logs/hitsz-autonet/service.log`

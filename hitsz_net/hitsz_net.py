@@ -153,144 +153,166 @@ def login(username, password):
         notify("HITSZ Net", "Configuration error: Missing credentials")
         return False
 
-    logger.info("Attempting to login...")
-
     def request_timestamp():
         return int(time.time() * 1000) + random.randint(0, 999)
 
-    try:
-        callback = generate_callback()
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
+        logger.info(f"Attempting to login... (attempt {attempt}/{max_retries})")
+        try:
+            callback = generate_callback()
 
-        # Step 1: Get the current portal-side IP address.
-        response = requests.get(
-            "http://10.248.98.2/cgi-bin/rad_user_info",
-            params={"callback": callback, "_": request_timestamp()},
-            timeout=10,
-        )
-        user_info = parse_jsonp(response.text)
-        if not user_info:
-            logger.warning("Failed to parse Srun user info response.")
-            return False
+            # Step 1: Get the current portal-side IP address.
+            response = requests.get(
+                "http://10.248.98.2/cgi-bin/rad_user_info",
+                params={"callback": callback, "_": request_timestamp()},
+                timeout=10,
+                allow_redirects=False,
+            )
+            if response.is_redirect:
+                raise requests.RequestException(
+                    f"Portal redirected (HTTP {response.status_code}) — network not ready yet"
+                )
+            user_info = parse_jsonp(response.text)
+            if not user_info:
+                raise requests.RequestException(
+                    "Failed to parse Srun user info response"
+                )
 
-        ip = user_info.get("online_ip")
-        if not ip:
-            logger.warning("Srun user info response did not include online_ip.")
-            return False
+            ip = user_info.get("online_ip")
+            if not ip:
+                raise requests.RequestException(
+                    "Srun user info response missing online_ip"
+                )
 
-        # Step 2: Get the per-login challenge token.
-        response = requests.get(
-            "http://10.248.98.2/cgi-bin/get_challenge",
-            params={
-                "callback": callback,
-                "username": username,
-                "ip": ip,
-                "_": request_timestamp(),
-            },
-            timeout=10,
-        )
-        challenge_info = parse_jsonp(response.text)
-        if not challenge_info:
-            logger.warning("Failed to parse Srun challenge response.")
-            return False
+            # Step 2: Get the per-login challenge token.
+            response = requests.get(
+                "http://10.248.98.2/cgi-bin/get_challenge",
+                params={
+                    "callback": callback,
+                    "username": username,
+                    "ip": ip,
+                    "_": request_timestamp(),
+                },
+                timeout=10,
+                allow_redirects=False,
+            )
+            if response.is_redirect:
+                raise requests.RequestException(
+                    f"Portal redirected (HTTP {response.status_code}) — network not ready yet"
+                )
+            challenge_info = parse_jsonp(response.text)
+            if not challenge_info:
+                raise requests.RequestException(
+                    "Failed to parse Srun challenge response"
+                )
 
-        token = challenge_info.get("challenge")
-        if not token:
-            logger.warning("Srun challenge response did not include challenge token.")
-            return False
+            token = challenge_info.get("challenge")
+            if not token:
+                raise requests.RequestException("Srun challenge response missing token")
 
-        # Step 3: Compute the encrypted login parameters.
-        ac_id = "1"
-        n = "200"
-        login_type = "1"
-        hmd5 = srun_hmac_md5(password, token)
-        info_json = json.dumps(
-            {
-                "username": username,
-                "password": password,
-                "ip": ip,
-                "acid": ac_id,
-                "enc_ver": "srun_bx1",
-            },
-            separators=(",", ":"),
-        )
-        info = "{SRBX1}" + srun_base64(srun_xencode(info_json, token))
-        chkstr = (
-            token
-            + username
-            + token
-            + hmd5
-            + token
-            + ac_id
-            + token
-            + ip
-            + token
-            + n
-            + token
-            + login_type
-            + token
-            + info
-        )
-        chksum = srun_sha1(chkstr)
+            # Step 3: Compute the encrypted login parameters.
+            ac_id = "1"
+            n = "200"
+            login_type = "1"
+            hmd5 = srun_hmac_md5(password, token)
+            info_json = json.dumps(
+                {
+                    "username": username,
+                    "password": password,
+                    "ip": ip,
+                    "acid": ac_id,
+                    "enc_ver": "srun_bx1",
+                },
+                separators=(",", ":"),
+            )
+            info = "{SRBX1}" + srun_base64(srun_xencode(info_json, token))
+            chkstr = (
+                token
+                + username
+                + token
+                + hmd5
+                + token
+                + ac_id
+                + token
+                + ip
+                + token
+                + n
+                + token
+                + login_type
+                + token
+                + info
+            )
+            chksum = srun_sha1(chkstr)
 
-        # Step 4: Submit the login request.
-        response = requests.get(
-            "http://10.248.98.2/cgi-bin/srun_portal",
-            params={
-                "callback": callback,
-                "action": "login",
-                "username": username,
-                "password": "{MD5}" + hmd5,
-                "ac_id": ac_id,
-                "ip": ip,
-                "chksum": chksum,
-                "info": info,
-                "n": n,
-                "type": login_type,
-                "os": "macOS+15",
-                "name": "Mac",
-                "double_stack": "0",
-                "_": request_timestamp(),
-            },
-            timeout=10,
-        )
-        login_info = parse_jsonp(response.text)
-        if not login_info:
-            logger.warning("Failed to parse Srun login response.")
-            return False
+            # Step 4: Submit the login request.
+            response = requests.get(
+                "http://10.248.98.2/cgi-bin/srun_portal",
+                params={
+                    "callback": callback,
+                    "action": "login",
+                    "username": username,
+                    "password": "{MD5}" + hmd5,
+                    "ac_id": ac_id,
+                    "ip": ip,
+                    "chksum": chksum,
+                    "info": info,
+                    "n": n,
+                    "type": login_type,
+                    "os": "macOS+15",
+                    "name": "Mac",
+                    "double_stack": "0",
+                    "_": request_timestamp(),
+                },
+                timeout=10,
+                allow_redirects=False,
+            )
+            if response.is_redirect:
+                raise requests.RequestException(
+                    f"Portal redirected (HTTP {response.status_code}) — network not ready yet"
+                )
+            login_info = parse_jsonp(response.text)
+            if not login_info:
+                raise requests.RequestException("Failed to parse Srun login response")
 
-        success_message = login_info.get("suc_msg")
-        if success_message:
-            success_message_lower = success_message.lower()
-            if (
-                "login_ok" in success_message_lower
-                or "success" in success_message_lower
+            success_message = login_info.get("suc_msg")
+            if success_message and (
+                "login_ok" in success_message.lower()
+                or "success" in success_message.lower()
             ):
                 logger.info(f"Login successful: {success_message}")
                 return True
 
-        error_message = login_info.get("error")
-        if error_message:
-            logger.warning(f"Login failed: {error_message}")
+            error_message = login_info.get("error")
+            if error_message:
+                logger.warning(f"Login failed: {error_message}")
+                return False
+
+            # Ambiguous response — verify via connectivity
+            logger.warning("Srun login response ambiguous, checking connectivity...")
+            if check_internet():
+                logger.info("Login successful (connectivity verified).")
+                return True
+
+            logger.error(
+                "Login failed: ambiguous response and connectivity check failed."
+            )
             return False
 
-        logger.warning("Srun login response ambiguous, checking actual connectivity...")
-        if check_internet():
-            logger.info("Login successful (connectivity verified).")
-            return True
+        except requests.RequestException as e:
+            logger.warning(f"Login attempt {attempt} failed: {e}")
+            if attempt < max_retries:
+                wait = 5 * attempt
+                logger.info(f"Retrying in {wait}s...")
+                time.sleep(wait)
+            else:
+                logger.error("All login attempts exhausted.")
+                return False
+        except Exception as e:
+            logger.error(f"Unexpected error during login: {e}")
+            return False
 
-        logger.error(
-            "Login failed: Srun response ambiguous and connectivity check failed."
-        )
-        return False
-
-    except requests.RequestException as e:
-        logger.warning(f"Login request error: {e}")
-        return False
-    except Exception as e:
-        logger.error(f"Unexpected error during login: {e}")
-        return False
-    finally:
-        pass
+    return False
 
 
 def main():
