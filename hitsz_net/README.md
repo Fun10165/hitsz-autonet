@@ -1,6 +1,6 @@
 # HITSZ Network Auto-Login - Python Daemon
 
-Automated login daemon for HITSZ campus network using Selenium WebDriver.
+Pure-HTTP login daemon for the HITSZ campus network and macOS LaunchAgent.
 
 ## Overview
 
@@ -8,36 +8,34 @@ This Python script provides automated authentication for HITSZ campus network. I
 
 ## Features
 
-- **Automated Login**: Detects network status and logs in when needed
-- **Captive Portal Detection**: Identifies when network access requires authentication
-- **macOS Service Integration**: Runs as LaunchAgent for automatic startup
-- **ChromeDriver Auto-Management**: Automatically downloads compatible ChromeDriver
-- **Headless Operation**: Runs without visible browser windows
+- **Pure HTTP Login**: Uses the Srun challenge and portal APIs; no browser or driver
+- **Captive Portal Detection**: Validates the Baidu response instead of trusting HTTP 200
+- **Safe Wired Handoff**: Removes only a verified local Wi-Fi IP session when USB/Ethernet becomes the default route
+- **Interface Binding**: Pins Srun probes and login requests to the intended macOS interface
+- **macOS Service Integration**: Runs as a LaunchAgent and can react to lid-open events
 
 ## Installation
 
 ### Prerequisites
 
-- Python 3.8+
-- Chrome browser installed
-- macOS 10.15+ (for LaunchAgent features)
+- Python 3.13+
+- `uv`
+- macOS for LaunchAgent, interface binding, and wired-handoff features
 
 ### Setup
 
 1. Install Python dependencies:
 ```bash
-pip3 install -r requirements.txt
+uv sync
 ```
 
 2. Create configuration file `.env`:
 ```bash
 HITSZ_USERNAME=your_username
 HITSZ_PASSWORD=your_password
-HITSZ_WIFI_SSID=HITSZ
-HITSZ_WIFI_BSSIDS=aa:bb:cc:dd:ee:ff,11:22:33:44:55:66
 ```
 
-`HITSZ_WIFI_BSSIDS` is a required comma-separated allowlist for trusted campus access points on macOS. The daemon now requires both the expected SSID and a trusted BSSID match before it will attempt portal login, so SSID spoofing alone will not trigger Selenium login attempts.
+Credentials are used only for Srun HTTP login. Wired handoff identifies the local Wi-Fi and wired interfaces from macOS `networksetup`, `route`, and `ipconfig` output.
 
 Configuration file locations (checked in order):
 - `~/.config/hitsz-autonet/.env`
@@ -47,43 +45,38 @@ Configuration file locations (checked in order):
 ### Install as macOS Service
 
 ```bash
-python3 service/install.py install --config .env
+uv run service/install.py install --config .env
 ```
 
 Check service status:
 ```bash
-python3 service/install.py status
+uv run service/install.py status
 ```
 
 Uninstall service:
 ```bash
-python3 service/install.py uninstall
+uv run service/install.py uninstall
 ```
 
 ## Manual Usage
 
 Run once (single authentication attempt):
 ```bash
-python3 hitsz_net/hitsz_net.py --once
+uv run hitsz_net/hitsz_net.py --once
 ```
 
 Run as foreground daemon (checks every 60 seconds):
 ```bash
-python3 hitsz_net/hitsz_net.py --daemon
-```
-
-Update ChromeDriver to match Chrome version:
-```bash
-python3 hitsz_net/hitsz_net.py --update-driver
+uv run hitsz_net/hitsz_net.py --daemon
 ```
 
 ## How It Works
 
-1. **Network Check**: Performs HTTP request to baidu.com
-2. **Captive Portal Detection**: Checks if response redirects to campus portal
-3. **Automated Login**: If captive portal detected, launches headless Chrome to authenticate
-4. **Verification**: Validates authentication success via `window.CONFIG.page` status
-5. **Continuous Monitoring**: Repeats check every 60 seconds
+1. **Route Inspection**: Detects the current macOS default interface
+2. **Wired Handoff**: If wired is active, verifies the exact bound Wi-Fi session before targeted logout and confirms the post-logout state
+3. **Network Check**: Probes Baidu and detects captive-portal redirects or substituted content
+4. **Srun Login**: Gets a challenge, computes HMAC-MD5/XXTEA/SHA1 parameters, and submits `/cgi-bin/srun_portal`
+5. **Verification**: Rechecks connectivity and repeats every 60 seconds
 
 ## Logs
 
@@ -102,12 +95,10 @@ tail -f ~/Library/Logs/hitsz-autonet/service.log
 
 - `HITSZ_USERNAME` - Campus network username
 - `HITSZ_PASSWORD` - Campus network password
-- `HITSZ_WIFI_SSID` - Expected campus Wi-Fi SSID on macOS (defaults to `HITSZ` if omitted)
-- `HITSZ_WIFI_BSSIDS` - Comma-separated trusted BSSID allowlist for macOS Wi-Fi login gating
 
 ### Service Configuration
 
-LaunchAgent plist: `~/Library/LaunchAgents/edu.hitsz.autonet.plist`
+LaunchAgent plist: `~/Library/LaunchAgents/com.github.hitsz.autonet.plist`
 
 The service:
 - Runs on network state changes (KeepAlive NetworkState trigger)
@@ -116,21 +107,12 @@ The service:
 
 ## Troubleshooting
 
-### ChromeDriver Issues
-
-If you get ChromeDriver version mismatch errors:
-```bash
-python3 hitsz_net/hitsz_net.py --update-driver
-```
-
-Note: ChromeDriver updates require internet access. If you're offline due to captive portal, use mobile hotspot temporarily.
-
 ### Service Won't Start
 
 1. Check if credentials are configured in `.env`
 2. Verify `.env` file is in one of the default locations
 3. Check logs at `~/Library/Logs/hitsz-autonet/error.log`
-4. Ensure Chrome browser is installed
+4. Run `uv run hitsz_net/hitsz_net.py --once` and inspect the result
 
 ### Authentication Fails
 
@@ -139,11 +121,12 @@ Note: ChromeDriver updates require internet access. If you're offline due to cap
 3. Test with `--once` flag for detailed output
 4. Check logs for specific error messages
 
-### Login Never Starts on macOS
+### Wired Handoff Does Not Remove Wi-Fi Session
 
-1. Confirm you are connected to the expected SSID from `HITSZ_WIFI_SSID`
-2. Confirm the current access point BSSID is included in `HITSZ_WIFI_BSSIDS`
-3. Check daemon logs for messages about untrusted SSID or BSSID skips
+1. Confirm `route -n get default` reports the USB/Ethernet interface.
+2. Confirm both interfaces still have distinct IPv4 addresses with `ipconfig getifaddr <interface>`.
+3. Check logs for an account/IP/MAC mismatch or a route-race refusal.
+4. The daemon deliberately skips logout when the Wi-Fi-bound precheck returns `not_online_error`.
 
 ## Platform Support
 
@@ -154,9 +137,7 @@ For Linux users, consider setting up a systemd service or cron job for automated
 
 ## Dependencies
 
-- `selenium>=4.0.0` - Browser automation
-- `webdriver-manager>=3.8.0` - ChromeDriver management
-- `requests>=2.25.0` - HTTP client for network testing
+- `requests` - Connectivity checks and Srun HTTP API calls
 - `python-dotenv` - Environment variable loading
 
 See `requirements.txt` for complete dependency list.

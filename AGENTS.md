@@ -1,13 +1,13 @@
 # Repository Guidelines
 
-**Generated:** 2026-06-17
+**Generated:** 2026-07-14
 
 ## Project Overview
 
 Automated HITSZ (Harbin Institute of Technology, Shenzhen) campus-network authentication — two independent implementations sharing operational constants but no code:
 
 - **Android App** (primary): Native Kotlin app with foreground service, `WebView`-based login, `DataStore` preferences. Manual on-device testing.
-- **Python Daemon** (legacy): Single-file `hitsz_net.py` — Selenium + ChromeDriver headless browser login, macOS LaunchAgent service. Synchronous `while True` loop.
+- **Python Daemon**: Single-file `hitsz_net.py` — pure-HTTP Srun login, safe Wi-Fi-to-wired session handoff, and macOS LaunchAgent service. Synchronous `while True` loop plus optional lid watcher.
 
 Both probe `http://www.baidu.com` for connectivity, detect captive-portal redirects, and authenticate against `http://10.248.98.2/srun_portal_pc?ac_id=1&theme=basic2` on a 60-second loop.
 
@@ -52,6 +52,9 @@ MainActivity ──(start/stop)─────────────┤
 ```
 main() ──> argparse ──> load_config() ──> while True:
                                                │
+                                  handle_wired_handoff()
+                                  (route + interface-bound Srun probe)
+                                               │
                                           check_internet()
                                           (requests.get to Baidu)
                                                │
@@ -59,23 +62,19 @@ main() ──> argparse ──> load_config() ──> while True:
                                         │  offline?    │
                                         └──────┬──────┘
                                                │ yes
-                                    is_trusted_hitsz_wifi()
-                                    (macOS: SSID + BSSID allowlist)
-                                               │
-                                          login()
-                                          (Selenium ChromeDriver headless)
+                                            login()
+                                  (challenge + encrypted HTTP API)
                                                │
                                           notify()
-                                          (macOS osascript notifications)
                                                │
                                           time.sleep(60)
 ```
 
 - **Config lookup order** (fixed): CLI `--config` path > `~/.config/hitsz-autonet/.env` > `/etc/hitsz-autonet/.env` > `./.env`
-- **Wi-Fi identity gating** (macOS only): Before launching Selenium, verifies SSID matches `HITSZ_WIFI_SSID` (default `'HITSZ'`) and BSSID is in the comma-separated `HITSZ_WIFI_BSSIDS` allowlist. Prevents credential exposure on spoofed networks. Bypassed to `True` on non-macOS platforms.
-- **Selenium lifecycle**: `get_chromedriver_service()` tries `webdriver-manager` install, falls back to `~/.wdm` cached driver search (most recent by mtime), then PATH default. Chrome runs headless with `--no-sandbox --headless=undefined --disable-gpu --disable-dev-shm-usage` and a fixed Chrome 120 user-agent.
-- **Login verification**: JS checks `window.CONFIG.page == 'success'`, then 3x `check_internet()` retries with 2s gaps.
-- **Error handling**: Broad `except Exception` in most functions (logs, rarely propagates). `login()` has `try/finally` guaranteeing `driver.quit()`. ChromeDriver version mismatch gets a special critical log + notification.
+- **Pure HTTP login**: Queries `rad_user_info`, obtains a challenge, computes HMAC-MD5 + Srun XXTEA/base64 + SHA1, then submits `srun_portal`; portal requests force-resolve `net.hitsz.edu.cn` to `10.248.98.2` for pre-login DNS failures.
+- **Interface binding** (macOS): `InterfaceAdapter` supplies both `source_address` and Darwin `IP_BOUND_IF` so probes and login requests cannot drift to another interface.
+- **Safe wired handoff**: Only runs when the default hardware port is wired. It verifies the Wi-Fi-bound Srun IP/account/MAC, rechecks the route, sends the current portal's IP-targeted `rad_user_dm` request, and requires a post-operation offline check. A precheck `not_online_error` never triggers logout.
+- **Error handling**: Portal and subprocess failures are logged and retried by the main loop. Credential absence exits immediately; route races and identity mismatches fail closed.
 
 ## Key Directories
 
@@ -85,7 +84,7 @@ main() ──> argparse ──> load_config() ──> while True:
 | `android-app/app/src/main/java/com/hitsz/autonet/ui/` | `MainActivity` — single screen |
 | `android-app/app/src/main/java/com/hitsz/autonet/service/` | Foreground service + boot/network receivers |
 | `android-app/app/src/main/java/com/hitsz/autonet/utils/` | `LoginManager`, `NetworkChecker`, `PreferencesManager` |
-| `hitsz_net/` | Legacy Python daemon: monolithic `hitsz_net.py`, `pyproject.toml`, `uv.lock` |
+| `hitsz_net/` | Python daemon: monolithic runtime, Srun crypto helper, project metadata |
 | `service/` | macOS LaunchAgent installer (`install.py`) — wraps `hitsz_net.py` |
 | `research-findings/` | Archival research (~47 .md files, Jan 2026). Reference only; not source of truth |
 | `config/` | Empty — reserved for future config artifacts |
@@ -123,19 +122,20 @@ All log scripts filter on three tags: `LoginManager|NetworkMonitorService|Networ
 ### Python Daemon
 
 ```bash
-# Install deps (pick one)
-pip3 install -r requirements.txt
-# or: cd hitsz_net && uv sync
+# Install dependencies
+uv sync
 
 # Run
-python3 hitsz_net/hitsz_net.py --once          # Single check + login
-python3 hitsz_net/hitsz_net.py --daemon        # Continuous loop
-python3 hitsz_net/hitsz_net.py --update-driver # Refresh ChromeDriver
+uv run hitsz_net/hitsz_net.py --once
+uv run hitsz_net/hitsz_net.py --daemon
 
 # macOS service management
-python3 service/install.py install --config .env
-python3 service/install.py uninstall
-python3 service/install.py status
+uv run service/install.py install --config .env
+uv run service/install.py uninstall
+uv run service/install.py status
+
+# Handoff contract tests
+uv run ./test_handoff.py
 ```
 
 Service logs: `~/Library/Logs/hitsz-autonet/service.log` and `error.log`.
@@ -144,8 +144,7 @@ Service logs: `~/Library/Logs/hitsz-autonet/service.log` and `error.log`.
 
 | Component | Version/Tool | Notes |
 |-----------|-------------|-------|
-| Python | >=3.13 | Managed via `uv` (`hitsz_net/uv.lock`) or legacy `pip` (`requirements.txt`) |
-| Selenium | 4.39.0 | ChromeDriver via `webdriver-manager` (in `requirements.txt` but **not** in `pyproject.toml` — be aware of this drift) |
+| Python | >=3.13 | Managed via root `uv.lock`; dependencies are `requests` and `python-dotenv` |
 | Kotlin | 2.0.0 | Android |
 | AGP | 8.5.0 | Android Gradle Plugin |
 | Gradle | 8.7 | Wrapper included |
@@ -158,11 +157,11 @@ Service logs: `~/Library/Logs/hitsz-autonet/service.log` and `error.log`.
 
 | File | Role |
 |------|------|
-| `hitsz_net/hitsz_net.py` | Python daemon: config, check, login, retry, notifications (~554 lines, monolithic) |
+| `hitsz_net/hitsz_net.py` | Python daemon: config, interface binding/handoff, connectivity check, Srun login, retry, notifications |
 | `hitsz_net/pyproject.toml` | Python project metadata + deps |
 | `hitsz_net/uv.lock` | Pinned transitive dependency versions |
-| `hitsz_net/.env.example` | Config template: `HITSZ_USERNAME`, `HITSZ_PASSWORD`, `HITSZ_WIFI_SSID`, `HITSZ_WIFI_BSSIDS` |
-| `requirements.txt` | Legacy pip deps (includes `webdriver-manager` that `pyproject.toml` omits) |
+| `hitsz_net/.env.example` | Config template: `HITSZ_USERNAME`, `HITSZ_PASSWORD` |
+| `test_handoff.py` | Stdlib `unittest` coverage for exact session identity, targeted parameters, and post-logout verification |
 | `service/install.py` | macOS LaunchAgent plist generator + lifecycle (label: `com.github.hitsz.autonet`) |
 | `android-app/app/build.gradle.kts` | Android dependencies, SDK versions, build config |
 | `android-app/app/src/main/AndroidManifest.xml` | Permissions, components, `foregroundServiceType="dataSync"` |
@@ -184,12 +183,12 @@ Service logs: `~/Library/Logs/hitsz-autonet/service.log` and `error.log`.
 - Do not assume HTTP 200 means internet access — captive-portal detection depends on redirect/content validation against Baidu.
 
 ### Python
-- **Monolithic**: All daemon logic in `hitsz_net.py` (~554 lines). No package tree, no modules.
-- **Synchronous**: Blocking `while True` loop with `time.sleep(60)`. No async, no threading, no concurrency.
-- **Error handling**: Broad `except Exception` in most functions. Logs and continues. Only ChromeDriver version mismatch gets a critical-level log.
-- **Config**: `python-dotenv` loading. Env var keys: `HITSZ_USERNAME`, `HITSZ_PASSWORD`, `HITSZ_WIFI_SSID` (default `'HITSZ'`), `HITSZ_WIFI_BSSIDS` (comma-separated).
-- **Logging**: `force=True` `basicConfig` with `%Y-%m-%d %H:%M:%S` format. Selenium/urllib3 suppressed to `ERROR`. Daemon mode logs to file; once mode to stdout.
-- **macOS-specific paths**: Airport Wi-Fi via `networksetup` + `/System/Library/PrivateFrameworks/Apple80211.framework/Resources/airport`. Notifications via `osascript -e 'display notification'`. LaunchAgent plist at `~/Library/LaunchAgents/com.github.hitsz.autonet.plist`.
+- **Monolithic**: Runtime orchestration remains in `hitsz_net.py`; cryptography lives in `srun_crypto.py`.
+- **Synchronous**: Blocking `while True` loop with `time.sleep(60)`; the optional lid watcher is the only background thread.
+- **Fail-closed handoff**: Never logout from an account-wide device list or from `not_online_error`. Require exact source-bound IP identity, optional response account/MAC agreement, stable wired route, accepted DM response, and post-logout offline state.
+- **Config**: `python-dotenv` keys are only `HITSZ_USERNAME` and `HITSZ_PASSWORD`.
+- **Logging**: `force=True` `basicConfig` with `%Y-%m-%d %H:%M:%S`; expected portal TLS warnings and urllib3 logs are suppressed.
+- **macOS integration**: `route`, `networksetup`, `ipconfig`, Darwin `IP_BOUND_IF`, `osascript`, and LaunchAgent label `com.github.hitsz.autonet`.
 
 ### Android
 - **Manual DI**: No Hilt, no Koin, no Dagger. Dependencies created in `onCreate` and passed explicitly.
@@ -221,7 +220,7 @@ Service logs: `~/Library/Logs/hitsz-autonet/service.log` and `error.log`.
 
 ## Testing & QA
 
-- **Python daemon**: No formal test suite. Manual verification via `--once` flag and log inspection.
+- **Python daemon**: Run `uv run ./test_handoff.py` for handoff contracts, then `uv run hitsz_net/hitsz_net.py --once --config .env` for a real non-daemon cycle and inspect the LaunchAgent log after restart.
 - **Android app**: Test dependencies declared in `build.gradle.kts` (JUnit, Espresso) but **no real test classes exist** in `src/test/` or `src/androidTest/`. All validation is manual on-device testing with `adb logcat` filtering.
 - **Debug workflow**: See `android-app/DEBUG.md` for the operational debugging guide — covers DNS issues, cleartext blocks, form structure changes, WebView DevTools debugging.
 - The project has no CI pipeline. Builds, linting, and testing are developer-driven.

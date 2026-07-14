@@ -12,6 +12,10 @@ import subprocess
 import requests
 from pathlib import Path
 from dotenv import load_dotenv
+from requests.adapters import HTTPAdapter
+from urllib3 import disable_warnings
+from urllib3.connection import HTTPConnection
+from urllib3.exceptions import InsecureRequestWarning
 from srun_crypto import (
     srun_xencode,
     srun_base64,
@@ -23,6 +27,7 @@ from srun_crypto import (
 
 # Configure logging
 logging.getLogger("urllib3").setLevel(logging.ERROR)
+disable_warnings(InsecureRequestWarning)
 
 # Default config paths
 DEFAULT_CONFIG_PATHS = [
@@ -48,6 +53,306 @@ def _patched_getaddrinfo(host, *args, **kwargs):
 
 
 socket.getaddrinfo = _patched_getaddrinfo
+
+# Darwin's IP_BOUND_IF socket option. Python's socket module does not expose it.
+_DARWIN_IP_BOUND_IF = 25
+
+
+class InterfaceAdapter(HTTPAdapter):
+    """Bind every connection in a requests session to one macOS interface."""
+
+    def __init__(self, interface, source_ip, *args, **kwargs):
+        self.interface = interface
+        self.source_ip = source_ip
+        super().__init__(*args, **kwargs)
+
+    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+        pool_kwargs["source_address"] = (self.source_ip, 0)
+        if sys.platform == "darwin":
+            interface_index = socket.if_nametoindex(self.interface)
+            pool_kwargs["socket_options"] = list(
+                HTTPConnection.default_socket_options
+            ) + [(socket.IPPROTO_IP, _DARWIN_IP_BOUND_IF, interface_index)]
+        return super().init_poolmanager(
+            connections, maxsize, block=block, **pool_kwargs
+        )
+
+
+def create_portal_session(interface=None, source_ip=None):
+    """Create a portal session, optionally pinned to a local interface and IP."""
+    if bool(interface) != bool(source_ip):
+        raise ValueError("interface and source_ip must be provided together")
+
+    session = requests.Session()
+    session.verify = False  # Portal cert is for net.hitsz.edu.cn, not its IP.
+    session.trust_env = False
+    if interface and source_ip:
+        adapter = InterfaceAdapter(interface, source_ip)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+    return session
+
+
+def create_default_route_session():
+    """Create a session pinned to the current macOS default interface."""
+    interface = get_default_interface()
+    source_ip = get_interface_ipv4(interface) if interface else None
+    if interface and source_ip:
+        return create_portal_session(interface, source_ip)
+    return create_portal_session()
+
+
+def get_default_interface():
+    """Return the macOS default-route interface, or None when unavailable."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        result = subprocess.run(
+            ["route", "-n", "get", "default"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+    for line in result.stdout.splitlines():
+        key, separator, value = line.partition(":")
+        if separator and key.strip() == "interface":
+            return value.strip() or None
+    return None
+
+
+def get_hardware_ports():
+    """Return macOS network devices keyed by BSD interface name."""
+    if sys.platform != "darwin":
+        return {}
+    try:
+        result = subprocess.run(
+            ["networksetup", "-listallhardwareports"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+
+    ports = {}
+    current = {}
+    for line in [*result.stdout.splitlines(), ""]:
+        if not line.strip():
+            device = current.get("device")
+            if device:
+                ports[device] = current
+            current = {}
+            continue
+        key, separator, value = line.partition(":")
+        if separator:
+            normalized = key.strip().lower().replace(" ", "_")
+            current[normalized] = value.strip()
+    return ports
+
+
+def get_interface_ipv4(interface):
+    """Return an interface's current IPv4 address, or None."""
+    try:
+        result = subprocess.run(
+            ["ipconfig", "getifaddr", interface],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def is_wifi_port(port):
+    """Return whether a networksetup hardware-port record is Wi-Fi."""
+    name = port.get("hardware_port", "").lower()
+    return name in {"wi-fi", "airport"}
+
+
+def is_wired_port(port):
+    """Return whether a hardware-port record represents wired Ethernet."""
+    name = port.get("hardware_port", "").lower()
+    return any(token in name for token in ("ethernet", "usb", "lan"))
+
+
+def query_user_info(session):
+    """Query Srun state for the session's bound source interface."""
+    response = session.get(
+        f"http://{_PORTAL_IP}/cgi-bin/rad_user_info",
+        params={"callback": generate_callback(), "_": int(time.time() * 1000)},
+        timeout=10,
+    )
+    response.raise_for_status()
+    info = parse_jsonp(response.text)
+    if not info:
+        raise requests.RequestException("Failed to parse Srun user info response")
+    return info
+
+
+def parse_online_devices(user_info):
+    """Return normalized records from Srun's nested online-device payload."""
+    devices = user_info.get("online_device_detail")
+    if isinstance(devices, str):
+        try:
+            devices = json.loads(devices)
+        except json.JSONDecodeError:
+            return []
+    if isinstance(devices, dict):
+        return [value for value in devices.values() if isinstance(value, dict)]
+    if isinstance(devices, list):
+        return [value for value in devices if isinstance(value, dict)]
+    return []
+
+
+def normalize_mac(value):
+    """Normalize a MAC address for comparison."""
+    return "".join(
+        character
+        for character in (value or "").lower()
+        if character in "0123456789abcdef"
+    )
+
+
+def find_verified_wifi_session(user_info, username, wifi_ip, wifi_mac):
+    """Return True only when Srun identifies this exact local Wi-Fi session."""
+    if user_info.get("error") != "ok" or user_info.get("online_ip") != wifi_ip:
+        return False
+
+    response_username = user_info.get("user_name") or user_info.get("username")
+    if response_username and response_username != username:
+        logger.error("Wi-Fi session belongs to a different account; refusing logout.")
+        return False
+
+    devices = parse_online_devices(user_info)
+    if not devices:
+        return True
+
+    expected_mac = normalize_mac(wifi_mac)
+    for device in devices:
+        if device.get("ip") != wifi_ip:
+            continue
+        device_mac = normalize_mac(device.get("user_mac") or device.get("mac"))
+        if not expected_mac or not device_mac or device_mac == expected_mac:
+            return True
+
+    logger.error("Wi-Fi IP was not paired with this interface MAC; refusing logout.")
+    return False
+
+
+def logout_wifi_session(session, username, wifi_ip):
+    """Ask Srun DM to logout one explicitly identified IP session."""
+    request_time = int(time.time())
+    unbind = "1"
+    sign = srun_sha1(f"{request_time}{username}{wifi_ip}{unbind}{request_time}")
+    response = session.get(
+        f"http://{_PORTAL_IP}/cgi-bin/rad_user_dm",
+        params={
+            "callback": generate_callback(),
+            "user_ip": wifi_ip,
+            "username": username,
+            "time": str(request_time),
+            "unbind": unbind,
+            "sign": sign,
+            "_": int(time.time() * 1000),
+        },
+        timeout=10,
+    )
+    response.raise_for_status()
+    result = parse_jsonp(response.text)
+    if not result:
+        raise requests.RequestException("Failed to parse Srun logout response")
+    return result
+
+
+def handle_wired_handoff(username):
+    """Safely remove this Mac's Wi-Fi session after wired Ethernet takes over."""
+    if sys.platform != "darwin":
+        return False
+
+    default_interface = get_default_interface()
+    ports = get_hardware_ports()
+    default_port = ports.get(default_interface, {})
+    if not default_interface or not is_wired_port(default_port):
+        return False
+
+    wired_ip = get_interface_ipv4(default_interface)
+    if not wired_ip:
+        return False
+
+    wifi_candidates = [
+        (interface, port)
+        for interface, port in ports.items()
+        if is_wifi_port(port) and interface != default_interface
+    ]
+    for wifi_interface, wifi_port in wifi_candidates:
+        wifi_ip = get_interface_ipv4(wifi_interface)
+        if not wifi_ip or wifi_ip == wired_ip:
+            continue
+
+        try:
+            with create_portal_session(wifi_interface, wifi_ip) as wifi_session:
+                wifi_info = query_user_info(wifi_session)
+                if not find_verified_wifi_session(
+                    wifi_info,
+                    username,
+                    wifi_ip,
+                    wifi_port.get("ethernet_address"),
+                ):
+                    continue
+
+                # Route changes can race the probe. Never logout unless wired is
+                # still the default immediately before the destructive request.
+                if get_default_interface() != default_interface:
+                    logger.warning(
+                        "Default route changed during handoff; skipping logout."
+                    )
+                    return False
+
+                logger.info(
+                    "Wired interface %s (%s) took over; logging out verified Wi-Fi session %s (%s).",
+                    default_interface,
+                    wired_ip,
+                    wifi_interface,
+                    wifi_ip,
+                )
+                result = logout_wifi_session(wifi_session, username, wifi_ip)
+                if result.get("error") != "ok":
+                    logger.error(
+                        "Targeted Wi-Fi logout was not accepted: %s",
+                        result.get("error"),
+                    )
+                    return False
+
+                for _ in range(3):
+                    time.sleep(1)
+                    post_logout_info = query_user_info(wifi_session)
+                    if (
+                        post_logout_info.get("error") == "not_online_error"
+                        and post_logout_info.get("online_ip") != wifi_ip
+                    ):
+                        logger.info(
+                            "Confirmed Wi-Fi session %s is no longer online.", wifi_ip
+                        )
+                        return True
+
+                logger.error(
+                    "Srun accepted the logout request, but Wi-Fi session %s is still online.",
+                    wifi_ip,
+                )
+                return False
+        except (OSError, requests.RequestException, ValueError) as error:
+            logger.warning("Unable to inspect or logout Wi-Fi session: %s", error)
+            return False
+
+    return False
 
 
 def watch_lid_events(stop_event, wake_event):
@@ -166,8 +471,7 @@ def login(username, password):
     def request_timestamp():
         return int(time.time() * 1000) + random.randint(0, 999)
 
-    session = requests.Session()
-    session.verify = False  # Portal cert is for net.hitsz.edu.cn, we connect via IP
+    session = create_default_route_session()
     logging.getLogger("urllib3").setLevel(logging.ERROR)
 
     max_retries = 3
@@ -379,6 +683,7 @@ def main():
         logger.info("Lid-open watcher started.")
 
     def run_check():
+        handle_wired_handoff(username)
         if not check_internet():
             logger.info("Internet unavailable. Initiating login sequence...")
             notify("HITSZ Net", "Network lost. Attempting login...")

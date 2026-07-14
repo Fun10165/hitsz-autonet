@@ -51,6 +51,18 @@ check_internet() ──→ baidu.com reachable? ──→ OK, sleep 60s
 
 No browser, no ChromeDriver — pure HTTP requests against the Srun portal API.
 
+### Wi-Fi to wired handoff
+
+On macOS, each monitor cycle checks the default route. When a USB/Ethernet interface takes over, the daemon:
+
+1. pins a portal query to the local Wi-Fi interface;
+2. verifies that Srun reports the exact Wi-Fi IP, account, and (when available) MAC;
+3. sends the current portal's IP-targeted `rad_user_dm` request;
+4. requires a follow-up query to confirm that Wi-Fi session is offline; and
+5. performs any needed login through the current default (wired) interface.
+
+A bare `not_online_error` never triggers logout and is not reported as a successful logout. The daemon never chooses an arbitrary session from the account's device list.
+
 ## Android App
 
 ```bash
