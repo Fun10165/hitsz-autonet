@@ -51,17 +51,20 @@ check_internet() ──→ baidu.com reachable? ──→ OK, sleep 60s
 
 No browser, no ChromeDriver — pure HTTP requests against the Srun portal API.
 
-### Wi-Fi to wired handoff
+### Stateful interface handoff
 
-On macOS, each monitor cycle checks the default route. When a USB/Ethernet interface takes over, the daemon:
+On macOS, the daemon remembers each account's observed interface/IP sessions in `~/Library/Application Support/hitsz-autonet/session-state.json` (mode `0600`). This survives DHCP changes and restarts.
 
-1. pins a portal query to the local Wi-Fi interface;
-2. verifies that Srun reports the exact Wi-Fi IP, account, and (when available) MAC;
-3. sends the current portal's IP-targeted `rad_user_dm` request;
-4. requires a follow-up query to confirm that Wi-Fi session is offline; and
-5. performs any needed login through the current default (wired) interface.
+Each monitor cycle:
 
-A bare `not_online_error` never triggers logout and is not reported as a successful logout. The daemon never chooses an arbitrary session from the account's device list.
+1. finds the current default interface and its IPv4 address;
+2. queries every remembered non-current IP directly with `rad_user_info?ip=<historical-ip>`;
+3. requires the historical IP to still be online under the configured account;
+4. reports a MAC change through a notification, but does not block logout because macOS private/random MACs can change;
+5. rechecks the default route, sends an IP-targeted `rad_user_dm`, and requires a follow-up query to report the old IP offline before deleting it from state; and
+6. records the current default-interface session after a successful login or online check.
+
+The daemon never chooses an unrelated account session. When Srun rejects login because the online-device limit was reached (for example `E2620`), the notification includes the portal code/message, current interface/IP, device total, and any returned device summary.
 
 ## Android App
 

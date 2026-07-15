@@ -1,13 +1,13 @@
 # Repository Guidelines
 
-**Generated:** 2026-07-14
+**Generated:** 2026-07-15
 
 ## Project Overview
 
 Automated HITSZ (Harbin Institute of Technology, Shenzhen) campus-network authentication — two independent implementations sharing operational constants but no code:
 
 - **Android App** (primary): Native Kotlin app with foreground service, `WebView`-based login, `DataStore` preferences. Manual on-device testing.
-- **Python Daemon**: Single-file `hitsz_net.py` — pure-HTTP Srun login, safe Wi-Fi-to-wired session handoff, and macOS LaunchAgent service. Synchronous `while True` loop plus optional lid watcher.
+- **Python Daemon**: Single-file `hitsz_net.py` — pure-HTTP Srun login, persistent per-interface session reconciliation, and macOS LaunchAgent service. Synchronous `while True` loop plus optional lid watcher.
 
 Both probe `http://www.baidu.com` for connectivity, detect captive-portal redirects, and authenticate against `http://10.248.98.2/srun_portal_pc?ac_id=1&theme=basic2` on a 60-second loop.
 
@@ -52,8 +52,8 @@ MainActivity ──(start/stop)─────────────┤
 ```
 main() ──> argparse ──> load_config() ──> while True:
                                                │
-                                  handle_wired_handoff()
-                                  (route + interface-bound Srun probe)
+                           reconcile_historical_sessions()
+                          (persistent IP history + targeted logout)
                                                │
                                           check_internet()
                                           (requests.get to Baidu)
@@ -73,8 +73,10 @@ main() ──> argparse ──> load_config() ──> while True:
 - **Config lookup order** (fixed): CLI `--config` path > `~/.config/hitsz-autonet/.env` > `/etc/hitsz-autonet/.env` > `./.env`
 - **Pure HTTP login**: Queries `rad_user_info`, obtains a challenge, computes HMAC-MD5 + Srun XXTEA/base64 + SHA1, then submits `srun_portal`; portal requests force-resolve `net.hitsz.edu.cn` to `10.248.98.2` for pre-login DNS failures.
 - **Interface binding** (macOS): `InterfaceAdapter` supplies both `source_address` and Darwin `IP_BOUND_IF` so probes and login requests cannot drift to another interface.
-- **Safe wired handoff**: Only runs when the default hardware port is wired. It verifies the Wi-Fi-bound Srun IP/account/MAC, rechecks the route, sends the current portal's IP-targeted `rad_user_dm` request, and requires a post-operation offline check. A precheck `not_online_error` never triggers logout.
-- **Error handling**: Portal and subprocess failures are logged and retried by the main loop. Credential absence exits immediately; route races and identity mismatches fail closed.
+- **Persistent session reconciliation**: State lives at `~/Library/Application Support/hitsz-autonet/session-state.json` with mode `0600`, keyed by account, interface, and historical IP. Every remembered non-current IP is queried directly; logout requires a fresh exact-IP and account match, a stable default route, accepted `rad_user_dm`, and a post-operation offline result.
+- **MAC policy**: Portal and hardware MACs are retained as diagnostic metadata. A changed/mismatched MAC triggers a notification but does not block logout because private/random MACs may change; the historical IP plus fresh account ownership are authoritative.
+- **Capacity diagnostics**: `LoginResult` carries rejected-login details. Capacity errors such as `E2620` notify with portal code/message, current interface/port/IP, device total, and returned device rows.
+- **Error handling**: Portal and subprocess failures are logged and retried by the main loop. Credential absence exits immediately; route races and account mismatches fail closed.
 
 ## Key Directories
 
@@ -161,7 +163,7 @@ Service logs: `~/Library/Logs/hitsz-autonet/service.log` and `error.log`.
 | `hitsz_net/pyproject.toml` | Python project metadata + deps |
 | `hitsz_net/uv.lock` | Pinned transitive dependency versions |
 | `hitsz_net/.env.example` | Config template: `HITSZ_USERNAME`, `HITSZ_PASSWORD` |
-| `test_handoff.py` | Stdlib `unittest` coverage for exact session identity, targeted parameters, and post-logout verification |
+| `test_handoff.py` | Stdlib `unittest` coverage for persisted history, targeted logout, MAC alerts, account ownership, capacity failures, and online reconciliation |
 | `service/install.py` | macOS LaunchAgent plist generator + lifecycle (label: `com.github.hitsz.autonet`) |
 | `android-app/app/build.gradle.kts` | Android dependencies, SDK versions, build config |
 | `android-app/app/src/main/AndroidManifest.xml` | Permissions, components, `foregroundServiceType="dataSync"` |
@@ -185,7 +187,7 @@ Service logs: `~/Library/Logs/hitsz-autonet/service.log` and `error.log`.
 ### Python
 - **Monolithic**: Runtime orchestration remains in `hitsz_net.py`; cryptography lives in `srun_crypto.py`.
 - **Synchronous**: Blocking `while True` loop with `time.sleep(60)`; the optional lid watcher is the only background thread.
-- **Fail-closed handoff**: Never logout from an account-wide device list or from `not_online_error`. Require exact source-bound IP identity, optional response account/MAC agreement, stable wired route, accepted DM response, and post-logout offline state.
+- **Historical-IP handoff**: Never choose an arbitrary account-wide device. For each remembered IP, require a fresh exact-IP/configured-account match, stable current route, accepted DM response, and post-logout offline state. MAC disagreement is notify-only, never a blocker.
 - **Config**: `python-dotenv` keys are only `HITSZ_USERNAME` and `HITSZ_PASSWORD`.
 - **Logging**: `force=True` `basicConfig` with `%Y-%m-%d %H:%M:%S`; expected portal TLS warnings and urllib3 logs are suppressed.
 - **macOS integration**: `route`, `networksetup`, `ipconfig`, Darwin `IP_BOUND_IF`, `osascript`, and LaunchAgent label `com.github.hitsz.autonet`.

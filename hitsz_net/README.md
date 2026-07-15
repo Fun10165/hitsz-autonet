@@ -10,8 +10,10 @@ This Python script provides automated authentication for HITSZ campus network. I
 
 - **Pure HTTP Login**: Uses the Srun challenge and portal APIs; no browser or driver
 - **Captive Portal Detection**: Validates the Baidu response instead of trusting HTTP 200
-- **Safe Wired Handoff**: Removes only a verified local Wi-Fi IP session when USB/Ethernet becomes the default route
-- **Interface Binding**: Pins Srun probes and login requests to the intended macOS interface
+- **Persistent Session Reconciliation**: Remembers per-interface IP history and removes old account-owned sessions after DHCP/interface changes
+- **MAC Change Alerts**: Records MACs as diagnostic metadata and notifies on changes without blocking logout
+- **Interface Binding**: Pins Srun probes, logout, and login requests to the intended macOS interface
+- **Detailed Capacity Errors**: Reports portal codes such as `E2620`, route/interface context, device totals, and returned device summaries
 - **macOS Service Integration**: Runs as a LaunchAgent and can react to lid-open events
 
 ## Installation
@@ -35,7 +37,7 @@ HITSZ_USERNAME=your_username
 HITSZ_PASSWORD=your_password
 ```
 
-Credentials are used only for Srun HTTP login. Wired handoff identifies the local Wi-Fi and wired interfaces from macOS `networksetup`, `route`, and `ipconfig` output.
+Credentials are used only for Srun HTTP login. Session reconciliation identifies interfaces from macOS `networksetup`, `route`, `ipconfig`, and `ifconfig` output.
 
 Configuration file locations (checked in order):
 - `~/.config/hitsz-autonet/.env`
@@ -72,17 +74,19 @@ uv run hitsz_net/hitsz_net.py --daemon
 
 ## How It Works
 
-1. **Route Inspection**: Detects the current macOS default interface
-2. **Wired Handoff**: If wired is active, verifies the exact bound Wi-Fi session before targeted logout and confirms the post-logout state
-3. **Network Check**: Probes Baidu and detects captive-portal redirects or substituted content
-4. **Srun Login**: Gets a challenge, computes HMAC-MD5/XXTEA/SHA1 parameters, and submits `/cgi-bin/srun_portal`
-5. **Verification**: Rechecks connectivity and repeats every 60 seconds
+1. **Historical Reconciliation**: Loads remembered interface/IP sessions and directly queries each non-current historical IP
+2. **Account Verification**: Logs out only when Srun still reports that exact IP under the configured account; MAC mismatches notify but do not block
+3. **Destructive-Action Guard**: Rechecks the default route, sends an IP-targeted `rad_user_dm`, and confirms the old IP is offline before deleting its record
+4. **Network Check**: Probes Baidu and detects captive-portal redirects or substituted content
+5. **Srun Login**: Gets a challenge, computes HMAC-MD5/XXTEA/SHA1 parameters, and submits `/cgi-bin/srun_portal`
+6. **Observation**: Records the current session after login or an online check, then repeats every 60 seconds
 
 ## Logs
 
-Service logs are stored at:
-- `~/Library/Logs/hitsz-autonet/service.log` - Normal operation logs
-- `~/Library/Logs/hitsz-autonet/error.log` - Error logs
+Service logs and state are stored at:
+- `~/Library/Logs/hitsz-autonet/service.log` - LaunchAgent stdout
+- `~/Library/Logs/hitsz-autonet/error.log` - Python logger output and LaunchAgent stderr
+- `~/Library/Application Support/hitsz-autonet/session-state.json` - per-account interface/IP history (mode `0600`)
 
 View logs:
 ```bash
@@ -121,12 +125,17 @@ The service:
 3. Test with `--once` flag for detailed output
 4. Check logs for specific error messages
 
-### Wired Handoff Does Not Remove Wi-Fi Session
+### Historical Session Is Not Removed
 
-1. Confirm `route -n get default` reports the USB/Ethernet interface.
-2. Confirm both interfaces still have distinct IPv4 addresses with `ipconfig getifaddr <interface>`.
-3. Check logs for an account/IP/MAC mismatch or a route-race refusal.
-4. The daemon deliberately skips logout when the Wi-Fi-bound precheck returns `not_online_error`.
+1. Inspect `session-state.json` and confirm the old IP was previously observed under the configured account.
+2. Confirm `rad_user_info?ip=<old-ip>` still reports that IP online under the same account; offline or other-account records are pruned without logout.
+3. Check `error.log` for a route-race refusal or rejected `rad_user_dm` response.
+4. A MAC mismatch is only a warning/notification and does not prevent an account-matching historical IP from being logged out.
+5. Logout is counted only after a post-operation query confirms the target IP is offline.
+
+### Online Device Limit Reached
+
+For Srun capacity failures such as `E2620`, inspect the notification and `error.log`. They include the raw portal code/message, current default interface/hardware port/IP, reported device total, and any device rows returned by the portal.
 
 ## Platform Support
 
